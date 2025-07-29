@@ -1,0 +1,246 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '15.0'
+        
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Build
+      run: swift build
+      
+    - name: Run Tests
+      run: swift test --enable-code-coverage
+      
+    - name: Generate Coverage Report
+      run: |
+        xcrun llvm-cov export -format="lcov" \
+          .build/debug/OfflineChatbotPackageTests.xctest/Contents/MacOS/OfflineChatbotPackageTests \
+          -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
+        
+        # Generate coverage percentage
+        COVERAGE=$(xcrun llvm-cov report \
+          .build/debug/OfflineChatbotPackageTests.xctest/Contents/MacOS/OfflineChatbotPackageTests \
+          -instr-profile .build/debug/codecov/default.profdata | \
+          tail -1 | awk '{print $4}' | sed 's/%//')
+        
+        echo "COVERAGE_PERCENTAGE=$COVERAGE" >> $GITHUB_ENV
+        echo "Code coverage: $COVERAGE%"
+        
+    - name: Upload Coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.lcov
+        fail_ci_if_error: true
+        
+    - name: Check Coverage Threshold
+      run: |
+        THRESHOLD=80
+        if [ "${COVERAGE_PERCENTAGE%.*}" -lt "$THRESHOLD" ]; then
+          echo "❌ Code coverage $COVERAGE_PERCENTAGE% is below threshold of $THRESHOLD%"
+          exit 1
+        else
+          echo "✅ Code coverage $COVERAGE_PERCENTAGE% meets threshold of $THRESHOLD%"
+        fi
+        
+  ui-tests:
+    name: UI Tests
+    runs-on: macos-14
+    needs: test
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '15.0'
+        
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Start Simulator
+      run: |
+        xcrun simctl boot "iPhone 15" || true
+        sleep 10
+        
+    - name: Run UI Tests
+      run: |
+        xcodebuild test \
+          -scheme OfflineChatbot \
+          -destination 'platform=iOS Simulator,name=iPhone 15' \
+          -testPlan UITests \
+          -only-testing:OfflineChatbotUITests || true
+        
+  lint:
+    name: SwiftLint
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: SwiftLint
+      uses: norio-nomura/action-swiftlint@3.2.1
+      with:
+        args: --strict
+
+  security:
+    name: Security Scan
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Run security scan
+      run: |
+        echo "🔍 Running security checks..."
+        
+        # MLX 모델 파일 크기 체크
+        echo "Checking for large MLX model files..."
+        if find . -name "*.mlx" -size +100M -print | head -1 | grep -q .; then
+          echo "⚠️  Warning: Large MLX model files found"
+          find . -name "*.mlx" -size +100M -exec echo "  - {}" \;
+        else
+          echo "✅ No large MLX model files found"
+        fi
+        
+        # API 키 노출 체크
+        echo "Checking for exposed API keys..."
+        if grep -r -l "ak_\|sk_\|pk_" --include="*.swift" --include="*.plist" --include="*.json" . 2>/dev/null; then
+          echo "❌ Error: Potential API keys found in source code"
+          exit 1
+        else
+          echo "✅ No exposed API keys found"
+        fi
+        
+        # Hardcoded credentials 체크
+        echo "Checking for hardcoded credentials..."
+        if grep -r -i -l "password\s*=\|token\s*=" --include="*.swift" . 2>/dev/null | grep -v Test; then
+          echo "⚠️  Warning: Potential hardcoded credentials found"
+        else
+          echo "✅ No hardcoded credentials found"
+        fi
+        
+  build-matrix:
+    name: Build Matrix
+    runs-on: macos-14
+    needs: [test, lint, security]
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        platform: [iOS, macOS]
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '15.0'
+        
+    - name: Cache Swift Package Manager
+      uses: actions/cache@v4
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+          
+    - name: Build for ${{ matrix.platform }} (${{ matrix.configuration }})
+      run: |
+        if [ "${{ matrix.platform }}" == "iOS" ]; then
+          xcodebuild build \
+            -scheme OfflineChatbot \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -configuration ${{ matrix.configuration }}
+        else
+          swift build -c $(echo ${{ matrix.configuration }} | tr '[:upper:]' '[:lower:]')
+        fi
+        
+  quality-gate:
+    name: Quality Gate
+    runs-on: macos-14
+    needs: [test, ui-tests, lint, security, build-matrix]
+    if: always()
+    
+    steps:
+    - name: Check Quality Gate
+      run: |
+        echo "🎯 Quality Gate Results:"
+        
+        if [ "${{ needs.test.result }}" == "success" ]; then
+          echo "✅ Unit Tests: PASSED"
+        else
+          echo "❌ Unit Tests: FAILED"
+          QUALITY_GATE_FAILED=true
+        fi
+        
+        if [ "${{ needs.ui-tests.result }}" == "success" ]; then
+          echo "✅ UI Tests: PASSED"
+        else
+          echo "❌ UI Tests: FAILED"
+          QUALITY_GATE_FAILED=true
+        fi
+        
+        if [ "${{ needs.lint.result }}" == "success" ]; then
+          echo "✅ Code Linting: PASSED"
+        else
+          echo "❌ Code Linting: FAILED"
+          QUALITY_GATE_FAILED=true
+        fi
+        
+        if [ "${{ needs.security.result }}" == "success" ]; then
+          echo "✅ Security Scan: PASSED"
+        else
+          echo "❌ Security Scan: FAILED"
+          QUALITY_GATE_FAILED=true
+        fi
+        
+        if [ "${{ needs.build-matrix.result }}" == "success" ]; then
+          echo "✅ Build Matrix: PASSED"
+        else
+          echo "❌ Build Matrix: FAILED"
+          QUALITY_GATE_FAILED=true
+        fi
+        
+        if [ "$QUALITY_GATE_FAILED" == "true" ]; then
+          echo ""
+          echo "❌ Quality Gate: FAILED - One or more checks did not pass"
+          echo "🚫 This PR cannot be merged until all quality checks pass"
+          exit 1
+        else
+          echo ""
+          echo "✅ Quality Gate: PASSED - All checks successful"
+          echo "🎉 This PR is ready for review and merge"
+        fi

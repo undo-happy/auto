@@ -1,0 +1,720 @@
+import Foundation
+import MLX
+import MLXNN
+import MLXRandom
+import MLXLLM
+import MLXLMCommon
+import os.log
+
+// MARK: - Gemma Configuration
+public struct GemmaConfiguration: Codable {
+    let vocab_size: Int
+    let hidden_size: Int
+    let intermediate_size: Int
+    let num_hidden_layers: Int
+    let num_attention_heads: Int
+    let num_key_value_heads: Int
+    let head_dim: Int
+    let max_position_embeddings: Int
+    let rms_norm_eps: Float
+    let rope_theta: Float
+    let model_type: String
+    
+    enum CodingKeys: String, CodingKey {
+        case vocab_size
+        case hidden_size
+        case intermediate_size
+        case num_hidden_layers
+        case num_attention_heads
+        case num_key_value_heads
+        case head_dim
+        case max_position_embeddings
+        case rms_norm_eps
+        case rope_theta
+        case model_type
+    }
+}
+
+// MARK: - Model Configuration
+public struct ModelConfiguration {
+    let vocabularySize: Int
+    let hiddenSize: Int
+    let intermediateSize: Int
+    let numHiddenLayers: Int
+    let numAttentionHeads: Int
+    let numKeyValueHeads: Int
+    let headDim: Int
+    let maxPositionEmbeddings: Int
+    let rmsNormEps: Float
+    let ropeTheta: Float
+}
+
+// MARK: - Generation Parameters
+public struct GenerationParameters {
+    let maxTokens: Int
+    let temperature: Float
+    let topP: Float
+    let repetitionPenalty: Float
+}
+
+// MARK: - LLM Protocol for MLX Models
+public protocol LLMModel {
+    func generate(inputIds: MLXArray, parameters: GenerationParameters) throws -> MLXArray
+    func generateStreaming(inputIds: MLXArray, maxTokens: Int, temperature: Float) throws -> AsyncThrowingStream<Int32, Error>
+    func loadWeights(_ weights: [String: MLXArray]) throws
+}
+
+// MARK: - Gemma LLM Implementation
+public class GemmaLLM: Module, LLMModel {
+    public struct Configuration {
+        let vocabularySize: Int
+        let hiddenSize: Int
+        let intermediateSize: Int
+        let numHiddenLayers: Int
+        let numAttentionHeads: Int
+        let numKeyValueHeads: Int
+        let headDim: Int
+        let maxPositionEmbeddings: Int
+        let rmsNormEps: Float
+        let ropeTheta: Float
+    }
+    
+    private let configuration: Configuration
+    private let embedding: Embedding
+    private let layers: [GemmaDecoderLayer]
+    private let norm: RMSNorm
+    private let lmHead: Linear
+    
+    public init(configuration: Configuration) {
+        self.configuration = configuration
+        
+        self.embedding = Embedding(
+            embeddingCount: configuration.vocabularySize,
+            dimensions: configuration.hiddenSize
+        )
+        
+        self.layers = (0..<configuration.numHiddenLayers).map { _ in
+            GemmaDecoderLayer(configuration: configuration)
+        }
+        
+        self.norm = RMSNorm(dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
+        
+        self.lmHead = Linear(
+            configuration.hiddenSize,
+            configuration.vocabularySize,
+            bias: false
+        )
+    }
+    
+    public func callAsFunction(_ inputIds: MLXArray) -> MLXArray {
+        let batchSize = inputIds.shape[0]
+        let sequenceLength = inputIds.shape[1]
+        
+        var hiddenStates = embedding(inputIds)
+        
+        // Position embeddings (RoPE will be applied in attention layers)
+        // For Gemma, positional embeddings are typically handled in attention mechanism
+        
+        // Transformer layers
+        for layer in layers {
+            hiddenStates = layer(hiddenStates)
+        }
+        
+        // Final norm
+        hiddenStates = norm(hiddenStates)
+        
+        // LM head
+        let logits = lmHead(hiddenStates)
+        
+        return logits
+    }
+    
+    public func generate(inputIds: MLXArray, parameters: GenerationParameters) throws -> MLXArray {
+        var currentIds = inputIds
+        var generatedTokens: [Int32] = []
+        
+        for _ in 0..<parameters.maxTokens {
+            let logits = self(currentIds)
+            let nextTokenLogits = logits[0..<1, -1..<logits.shape[1], 0..<logits.shape[2]]
+            
+            // Apply temperature
+            let scaledLogits = nextTokenLogits / parameters.temperature
+            
+            // Sample next token
+            let probabilities = softmax(scaledLogits, axes: [-1])
+            let nextToken = sample(probabilities)
+            
+            generatedTokens.append(nextToken)
+            
+            // Update input ids
+            let nextTokenArray = MLXArray([nextToken]).reshaped([1, 1])
+            currentIds = concatenated([currentIds, nextTokenArray], axis: 1)
+            
+            // Check for end token (assuming 2 is EOS)
+            if nextToken == 2 {
+                break
+            }
+        }
+        
+        return MLXArray(generatedTokens)
+    }
+    
+    public func generateStreaming(inputIds: MLXArray, maxTokens: Int, temperature: Float) throws -> AsyncThrowingStream<Int32, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    var currentIds = inputIds
+                    
+                    for _ in 0..<maxTokens {
+                        let logits = self(currentIds)
+                        let nextTokenLogits = logits[0..<1, -1..<logits.shape[1], 0..<logits.shape[2]]
+                        
+                        // Apply temperature
+                        let scaledLogits = nextTokenLogits / temperature
+                        
+                        // Sample next token
+                        let probabilities = softmax(scaledLogits, axes: [-1])
+                        let nextToken = sample(probabilities)
+                        
+                        continuation.yield(nextToken)
+                        
+                        // Update input ids
+                        let nextTokenArray = MLXArray([nextToken]).reshaped([1, 1])
+                        currentIds = concatenated([currentIds, nextTokenArray], axis: 1)
+                        
+                        // Check for end token
+                        if nextToken == 2 {
+                            break
+                        }
+                        
+                        // Small delay for streaming effect
+                        try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                    }
+                    
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+    
+    public func loadWeights(_ weights: [String: MLXArray]) throws {
+        // Load weights into model parameters
+        // This would typically involve mapping weight names to model parameters
+        // For now, we'll implement a basic structure
+    }
+    
+    private func createPositionalEmbeddings(positions: MLXArray, dimensions: Int) -> MLXArray {
+        // RoPE (Rotary Position Embeddings) implementation
+        let dim = dimensions / 2
+        let invFreq = MLXArray(stride(from: 0, to: dim, by: 2).map { i in
+            1.0 / pow(configuration.ropeTheta, Float(i) / Float(dim))
+        })
+        
+        let positionsFloat = positions.asType(Float.self)
+        let freqs = outer(positionsFloat, invFreq)
+        
+        let cos = cos(freqs)
+        let sin = sin(freqs)
+        
+        return concatenated([cos, sin], axis: -1)
+    }
+    
+    private func sample(_ probabilities: MLXArray) -> Int32 {
+        // Simple sampling - in practice, you'd want more sophisticated sampling
+        let probs = probabilities.asArray(Float.self)
+        let random = Float.random(in: 0...1)
+        
+        var cumulativeProb: Float = 0
+        for (index, prob) in probs.enumerated() {
+            cumulativeProb += prob
+            if random <= cumulativeProb {
+                return Int32(index)
+            }
+        }
+        
+        return Int32(probs.count - 1)
+    }
+}
+
+// MARK: - Gemma Decoder Layer
+public class GemmaDecoderLayer: Module {
+    private let selfAttention: GemmaAttention
+    private let mlp: GemmaMLP
+    private let inputLayerNorm: RMSNorm
+    private let postAttentionLayerNorm: RMSNorm
+    
+    public init(configuration: GemmaLLM.Configuration) {
+        self.selfAttention = GemmaAttention(configuration: configuration)
+        self.mlp = GemmaMLP(configuration: configuration)
+        self.inputLayerNorm = RMSNorm(dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
+        self.postAttentionLayerNorm = RMSNorm(dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
+    }
+    
+    public func callAsFunction(_ hiddenStates: MLXArray) -> MLXArray {
+        // Pre-attention layer norm
+        let normedHiddenStates = inputLayerNorm(hiddenStates)
+        
+        // Self attention
+        let attentionOutput = selfAttention(normedHiddenStates)
+        hiddenStates = hiddenStates + attentionOutput
+        
+        // Pre-MLP layer norm
+        let normedHiddenStates2 = postAttentionLayerNorm(hiddenStates)
+        
+        // MLP
+        let mlpOutput = mlp(normedHiddenStates2)
+        hiddenStates = hiddenStates + mlpOutput
+        
+        return hiddenStates
+    }
+}
+
+// MARK: - Gemma Attention
+public class GemmaAttention: Module {
+    private let qProj: Linear
+    private let kProj: Linear
+    private let vProj: Linear
+    private let oProj: Linear
+    private let configuration: GemmaLLM.Configuration
+    
+    public init(configuration: GemmaLLM.Configuration) {
+        self.configuration = configuration
+        
+        self.qProj = Linear(configuration.hiddenSize, configuration.numAttentionHeads * configuration.headDim, bias: false)
+        self.kProj = Linear(configuration.hiddenSize, configuration.numKeyValueHeads * configuration.headDim, bias: false)
+        self.vProj = Linear(configuration.hiddenSize, configuration.numKeyValueHeads * configuration.headDim, bias: false)
+        self.oProj = Linear(configuration.numAttentionHeads * configuration.headDim, configuration.hiddenSize, bias: false)
+    }
+    
+    public func callAsFunction(_ hiddenStates: MLXArray) -> MLXArray {
+        let batchSize = hiddenStates.shape[0]
+        let sequenceLength = hiddenStates.shape[1]
+        
+        let queries = qProj(hiddenStates)
+        let keys = kProj(hiddenStates)
+        let values = vProj(hiddenStates)
+        
+        // Reshape for multi-head attention
+        let queryStates = queries.reshaped([batchSize, sequenceLength, configuration.numAttentionHeads, configuration.headDim])
+        let keyStates = keys.reshaped([batchSize, sequenceLength, configuration.numKeyValueHeads, configuration.headDim])
+        let valueStates = values.reshaped([batchSize, sequenceLength, configuration.numKeyValueHeads, configuration.headDim])
+        
+        // Transpose for attention computation
+        let queryStatesT = queryStates.transposed(1, 2)
+        let keyStatesT = keyStates.transposed(1, 2)
+        let valueStatesT = valueStates.transposed(1, 2)
+        
+        // Compute attention scores
+        let attentionScores = matmul(queryStatesT, keyStatesT.transposed(-1, -2))
+        let attentionScores2 = attentionScores / sqrt(Float(configuration.headDim))
+        
+        // Apply attention weights
+        let attentionWeights = softmax(attentionScores2, axes: [-1])
+        let attentionOutput = matmul(attentionWeights, valueStatesT)
+        
+        // Reshape back
+        let attentionOutput2 = attentionOutput.transposed(1, 2).reshaped([batchSize, sequenceLength, -1])
+        
+        return oProj(attentionOutput2)
+    }
+}
+
+// MARK: - Gemma MLP
+public class GemmaMLP: Module {
+    private let gateProj: Linear
+    private let upProj: Linear
+    private let downProj: Linear
+    
+    public init(configuration: GemmaLLM.Configuration) {
+        self.gateProj = Linear(configuration.hiddenSize, configuration.intermediateSize, bias: false)
+        self.upProj = Linear(configuration.hiddenSize, configuration.intermediateSize, bias: false)
+        self.downProj = Linear(configuration.intermediateSize, configuration.hiddenSize, bias: false)
+    }
+    
+    public func callAsFunction(_ hiddenStates: MLXArray) -> MLXArray {
+        let gateOutput = gateProj(hiddenStates)
+        let upOutput = upProj(hiddenStates)
+        
+        // SwiGLU activation
+        let activatedGate = swish(gateOutput) * upOutput
+        
+        return downProj(activatedGate)
+    }
+}
+
+public final class GemmaModel: ObservableObject, @unchecked Sendable {
+    private var model: LLMModel?
+    private var tokenizer: Tokenizer?
+    private var modelConfiguration: ModelConfiguration?
+    private let logger = Logger(subsystem: "com.offlinechatbot.mlmodel", category: "GemmaModel")
+    
+    @Published public var isLoading = false
+    @Published public var loadingProgress: Double = 0.0
+    @Published public var modelStatus: ModelStatus = .notLoaded
+    @Published public var lastInferenceTime: TimeInterval = 0.0
+    @Published public var memoryUsage: UInt64 = 0
+    
+    private var retryCount = 0
+    private let maxRetries = 3
+    
+    public enum ModelStatus: Equatable {
+        case notLoaded
+        case loading
+        case loaded
+        case failed(Error)
+        
+        public static func == (lhs: ModelStatus, rhs: ModelStatus) -> Bool {
+            switch (lhs, rhs) {
+            case (.notLoaded, .notLoaded), (.loading, .loading), (.loaded, .loaded):
+                return true
+            case (.failed(let lhsError), .failed(let rhsError)):
+                return lhsError.localizedDescription == rhsError.localizedDescription
+            default:
+                return false
+            }
+        }
+    }
+    
+    public enum ModelError: LocalizedError {
+        case modelFileNotFound
+        case modelLoadingFailed(String)
+        case memoryInsufficicient
+        case inferenceTimeout
+        case invalidInput
+        
+        public var errorDescription: String? {
+            switch self {
+            case .modelFileNotFound:
+                return "모델 파일을 찾을 수 없습니다."
+            case .modelLoadingFailed(let message):
+                return "모델 로딩 실패: \(message)"
+            case .memoryInsufficicient:
+                return "메모리가 부족합니다."
+            case .inferenceTimeout:
+                return "추론 시간이 초과되었습니다."
+            case .invalidInput:
+                return "유효하지 않은 입력입니다."
+            }
+        }
+    }
+    
+    public init() {}
+    
+    public func loadModel() async throws {
+        await MainActor.run {
+            isLoading = true
+            modelStatus = .loading
+            loadingProgress = 0.0
+        }
+        
+        do {
+            let modelPath = try getModelPath()
+            logger.info("모델 로딩 시작: \(modelPath.path)")
+            
+            await updateProgress(0.2)
+            try await checkMemoryAvailability()
+            
+            await updateProgress(0.4)
+            model = try await loadMLXModel(from: modelPath)
+            
+            await updateProgress(0.8)
+            try await performWarmupInference()
+            
+            await updateProgress(1.0)
+            await MainActor.run {
+                modelStatus = .loaded
+                isLoading = false
+            }
+            
+            logger.info("모델 로딩 완료")
+            retryCount = 0
+            
+        } catch {
+            logger.error("모델 로딩 실패: \(error.localizedDescription)")
+            await handleLoadingError(error)
+        }
+    }
+    
+    private func getModelPath() throws -> URL {
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let modelPath = documentsPath.appendingPathComponent("Models")
+        
+        guard FileManager.default.fileExists(atPath: modelPath.path) else {
+            throw ModelError.modelFileNotFound
+        }
+        
+        return modelPath
+    }
+    
+    private func loadMLXModel(from path: URL) async throws -> LLMModel {
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    let loadedModel = try self?.createGemmaModel(from: path)
+                    if let loadedModel = loadedModel {
+                        continuation.resume(returning: loadedModel)
+                    } else {
+                        continuation.resume(throwing: ModelError.modelLoadingFailed("Model creation failed"))
+                    }
+                } catch {
+                    continuation.resume(throwing: ModelError.modelLoadingFailed(error.localizedDescription))
+                }
+            }
+        }
+    }
+    
+    private func createGemmaModel(from path: URL) throws -> LLMModel {
+        // 모델 설정 파일 로드
+        let configPath = path.appendingPathComponent("config.json")
+        guard let configData = try? Data(contentsOf: configPath),
+              let config = try? JSONDecoder().decode(GemmaConfiguration.self, from: configData) else {
+            throw ModelError.modelLoadingFailed("Failed to load model configuration")
+        }
+        
+        // 토크나이저 로드
+        let tokenizerPath = path.appendingPathComponent("tokenizer.json")
+        guard FileManager.default.fileExists(atPath: tokenizerPath.path) else {
+            throw ModelError.modelLoadingFailed("Tokenizer file not found")
+        }
+        
+        self.tokenizer = try LlamaTokenizer(tokenizerPath)
+        self.modelConfiguration = ModelConfiguration(
+            vocabularySize: config.vocab_size,
+            hiddenSize: config.hidden_size,
+            intermediateSize: config.intermediate_size,
+            numHiddenLayers: config.num_hidden_layers,
+            numAttentionHeads: config.num_attention_heads,
+            numKeyValueHeads: config.num_key_value_heads,
+            headDim: config.head_dim,
+            maxPositionEmbeddings: config.max_position_embeddings,
+            rmsNormEps: config.rms_norm_eps,
+            ropeTheta: config.rope_theta
+        )
+        
+        // 모델 가중치 로드
+        let weightsPath = path.appendingPathComponent("model.safetensors")
+        let weights = try loadSafetensorsWeights(from: weightsPath)
+        
+        // Gemma 모델 생성
+        return try createGemmaLLMModel(configuration: modelConfiguration!, weights: weights)
+    }
+    
+    private func loadSafetensorsWeights(from path: URL) throws -> [String: MLXArray] {
+        // Safetensors 파일에서 가중치 로드
+        guard let data = try? Data(contentsOf: path) else {
+            throw ModelError.modelLoadingFailed("Failed to load weights file")
+        }
+        
+        // 간단한 safetensors 파싱 (실제로는 더 복잡한 파싱이 필요)
+        let weights: [String: MLXArray] = [:]
+        // TODO: 실제 safetensors 파싱 구현
+        return weights
+    }
+    
+    private func createGemmaLLMModel(configuration: ModelConfiguration, weights: [String: MLXArray]) throws -> LLMModel {
+        // MLX Gemma 모델 구조 생성
+        let model = GemmaLLM(configuration: GemmaLLM.Configuration(
+            vocabularySize: configuration.vocabularySize,
+            hiddenSize: configuration.hiddenSize,
+            intermediateSize: configuration.intermediateSize,
+            numHiddenLayers: configuration.numHiddenLayers,
+            numAttentionHeads: configuration.numAttentionHeads,
+            numKeyValueHeads: configuration.numKeyValueHeads,
+            headDim: configuration.headDim,
+            maxPositionEmbeddings: configuration.maxPositionEmbeddings,
+            rmsNormEps: configuration.rmsNormEps,
+            ropeTheta: configuration.ropeTheta
+        ))
+        
+        // 가중치 로드
+        try model.loadWeights(weights)
+        
+        return model
+    }
+    
+    private func checkMemoryAvailability() async throws {
+        var memoryInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let result = withUnsafeMutablePointer(to: &memoryInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        
+        guard result == KERN_SUCCESS else {
+            throw ModelError.memoryInsufficicient
+        }
+        
+        let usedMemory = memoryInfo.resident_size
+        await MainActor.run {
+            self.memoryUsage = usedMemory
+        }
+        
+        // 6GB 이상 필요 (PRD 요구사항)
+        let requiredMemory: UInt64 = 6 * 1024 * 1024 * 1024
+        let availableMemory = ProcessInfo.processInfo.physicalMemory
+        
+        if availableMemory < requiredMemory {
+            throw ModelError.memoryInsufficicient
+        }
+    }
+    
+    private func performWarmupInference() async throws {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        // 워밍업을 위한 더미 추론
+        let _ = try await generateResponse(for: "테스트")
+        
+        let inferenceTime = CFAbsoluteTimeGetCurrent() - startTime
+        await MainActor.run {
+            self.lastInferenceTime = inferenceTime
+        }
+        
+        // 5초 이내 로딩 요구사항 확인
+        if inferenceTime > 5.0 {
+            logger.warning("초기 추론 시간이 5초를 초과했습니다: \(inferenceTime)초")
+        }
+    }
+    
+    private func updateProgress(_ progress: Double) async {
+        await MainActor.run {
+            self.loadingProgress = progress
+        }
+    }
+    
+    private func handleLoadingError(_ error: Error) async {
+        self.retryCount += 1
+        
+        if self.retryCount < self.maxRetries {
+            logger.info("모델 로딩 재시도 (\(self.retryCount)/\(self.maxRetries))")
+            try? await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(self.retryCount)) * 1_000_000_000))
+            try? await loadModel()
+        } else {
+            await MainActor.run {
+                self.modelStatus = .failed(error)
+                self.isLoading = false
+            }
+        }
+    }
+    
+    public func generateResponse(for input: String, maxTokens: Int = 512, temperature: Float = 0.7) async throws -> String {
+        guard let model = model, let tokenizer = tokenizer else {
+            throw ModelError.modelFileNotFound
+        }
+        
+        guard !input.isEmpty else {
+            throw ModelError.invalidInput
+        }
+        
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    // 입력 텍스트를 토큰으로 변환
+                    let tokens = tokenizer.encode(text: input)
+                    let inputIds = MLXArray(tokens.map { Int32($0) })
+                    
+                    // 텍스트 생성 파라미터
+                    let generationParams = GenerationParameters(
+                        maxTokens: maxTokens,
+                        temperature: temperature,
+                        topP: 0.9,
+                        repetitionPenalty: 1.1
+                    )
+                    
+                    // 텍스트 생성
+                    let generatedTokens = try model.generate(
+                        inputIds: inputIds,
+                        parameters: generationParams
+                    )
+                    
+                    // 토큰을 텍스트로 디코드
+                    let tokenInts = generatedTokens.asArray(Int32.self)
+                    let response = tokenizer.decode(tokens: tokenInts.map { Int($0) })
+                    
+                    let inferenceTime = CFAbsoluteTimeGetCurrent() - startTime
+                    Task { @MainActor [weak self] in
+                        self?.lastInferenceTime = inferenceTime
+                    }
+                    
+                    continuation.resume(returning: response)
+                } catch {
+                    continuation.resume(throwing: ModelError.modelLoadingFailed(error.localizedDescription))
+                }
+            }
+        }
+    }
+    
+    // 스트리밍 응답을 위한 AsyncSequence 기반 메서드
+    public func generateStreamingResponse(for input: String, maxTokens: Int = 512, temperature: Float = 0.7) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                do {
+                    guard let model = model, let tokenizer = tokenizer else {
+                        continuation.finish(throwing: ModelError.modelFileNotFound)
+                        return
+                    }
+                    
+                    guard !input.isEmpty else {
+                        continuation.finish(throwing: ModelError.invalidInput)
+                        return
+                    }
+                    
+                    // 입력 텍스트를 토큰으로 변환
+                    let tokens = tokenizer.encode(text: input)
+                    let inputIds = MLXArray(tokens.map { Int32($0) })
+                    
+                    // 스트리밍 생성
+                    for try await token in model.generateStreaming(
+                        inputIds: inputIds,
+                        maxTokens: maxTokens,
+                        temperature: temperature
+                    ) {
+                        let tokenText = tokenizer.decode(tokens: [Int(token)])
+                        continuation.yield(tokenText)
+                    }
+                    
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+    
+    public func unloadModel() {
+        model = nil
+        tokenizer = nil
+        modelConfiguration = nil
+        modelStatus = .notLoaded
+        logger.info("모델 언로드됨")
+    }
+    
+    public func isModelLoaded() -> Bool {
+        return model != nil && modelStatus == .loaded
+    }
+    
+    public func getModelInfo() -> ModelInfo {
+        return ModelInfo(
+            isLoaded: isModelLoaded(),
+            memoryUsage: memoryUsage,
+            lastInferenceTime: lastInferenceTime,
+            status: modelStatus
+        )
+    }
+}
+
+public struct ModelInfo {
+    public let isLoaded: Bool
+    public let memoryUsage: UInt64
+    public let lastInferenceTime: TimeInterval
+    public let status: GemmaModel.ModelStatus
+    
+    public var memoryUsageString: String {
+        return ByteCountFormatter.string(fromByteCount: Int64(memoryUsage), countStyle: .memory)
+    }
+}

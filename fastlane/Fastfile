@@ -1,0 +1,67 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Build and test the app"
+  lane :test do
+    scan(
+      scheme: "OfflineChatbot",
+      clean: true,
+      code_coverage: true
+    )
+  end
+
+  desc "Build for TestFlight"
+  lane :beta do
+    increment_build_number(xcodeproj: "OfflineChatbot.xcodeproj")
+    
+    build_app(
+      scheme: "OfflineChatbot",
+      configuration: "Release",
+      clean: true,
+      export_method: "app-store"
+    )
+    
+    upload_to_testflight(
+      skip_waiting_for_build_processing: true,
+      changelog: "• MLX 기반 오프라인 AI 모델 통합\n• 멀티모달 입력 지원 (텍스트, 음성, 이미지)\n• 오프라인/온라인 자동 전환"
+    )
+  end
+
+  desc "Release to App Store"
+  lane :release do
+    increment_version_number(bump_type: "patch")
+    increment_build_number(xcodeproj: "OfflineChatbot.xcodeproj")
+    
+    build_app(
+      scheme: "OfflineChatbot",
+      configuration: "Release", 
+      clean: true,
+      export_method: "app-store"
+    )
+    
+    upload_to_app_store(
+      force: true,
+      submit_for_review: false
+    )
+  end
+
+  desc "Generate screenshots for App Store"
+  lane :screenshots do
+    capture_screenshots(
+      scheme: "OfflineChatbot"
+    )
+  end
+
+  desc "Sync certificates and provisioning profiles"
+  lane :certificates do
+    match(type: "appstore")
+    match(type: "development")
+  end
+
+  error do |lane, exception|
+    slack(
+      message: "Error in lane #{lane}: #{exception.message}",
+      success: false
+    ) if ENV["SLACK_URL"]
+  end
+end
