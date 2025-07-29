@@ -6,6 +6,7 @@ public final class NetworkManager: ObservableObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "NetworkMonitor")
     
     @Published public var isConnected = false
+    @Published public var isNetworkAvailable = false // 추가
     @Published public var connectionType: NWInterface.InterfaceType?
     @Published public var isExpensiveConnection = false
     
@@ -15,10 +16,15 @@ public final class NetworkManager: ObservableObject, @unchecked Sendable {
     
     private func startMonitoring() {
         monitor.pathUpdateHandler = { [weak self] path in
-            DispatchQueue.main.async {
-                self?.isConnected = path.status == .satisfied
-                self?.connectionType = path.availableInterfaces.first?.type
-                self?.isExpensiveConnection = path.isExpensive
+            Task { [weak self] in
+                guard let self else { return }
+                let isConnected = await self.checkConnectivity()
+                DispatchQueue.main.async {
+                    self.isConnected = isConnected
+                    self.isNetworkAvailable = isConnected
+                    self.connectionType = path.availableInterfaces.first?.type
+                    self.isExpensiveConnection = path.isExpensive
+                }
             }
         }
         monitor.start(queue: queue)
@@ -30,10 +36,17 @@ public final class NetworkManager: ObservableObject, @unchecked Sendable {
     
     public func checkConnectivity() async -> Bool {
         return await withCheckedContinuation { continuation in
-            let testURL = URL(string: "https://httpbin.org/get")!
-            let task = URLSession.shared.dataTask(with: testURL) { _, response, error in
-                if let httpResponse = response as? HTTPURLResponse {
-                    continuation.resume(returning: httpResponse.statusCode == 200)
+            var request = URLRequest(url: URL(string: "https://www.apple.com/library/test/success.html")!)
+            request.timeoutInterval = 5 // 5초 타임아웃
+
+            let task = URLSession.shared.dataTask(with: request) { _, response, error in
+                if let error = error as? URLError, error.code == .notConnectedToInternet {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    continuation.resume(returning: true)
                 } else {
                     continuation.resume(returning: false)
                 }

@@ -110,6 +110,12 @@ struct ModelDownloadCard: View {
                 }
                 .buttonStyle(.borderedProminent)
             }
+
+            if let errorMessage = downloader.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
         }
         .padding()
         .background(Color.green.opacity(0.1))

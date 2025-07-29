@@ -82,25 +82,129 @@ class NetworkMonitor: ObservableObject {
     
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "NetworkMonitor")
+    private var internetTestTask: Task<Void, Never>?
     
     init() {
+        print("🚀 [NetworkMonitor] 초기화 시작")
         startMonitoring()
+        
+        // 초기 상태를 즉시 설정 (기본값: 연결 없음)
+        Task { @MainActor in
+            self.isConnected = false
+            self.isWiFi = false
+            self.isCellular = false
+            self.isExpensive = false
+            print("📱 [NetworkMonitor] 초기 상태 설정 완료 - 모든 값 false")
+        }
     }
     
     private func startMonitoring() {
         monitor.pathUpdateHandler = { [weak self] path in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.isConnected = path.status == .satisfied
-                self.isWiFi = path.usesInterfaceType(.wifi)
-                self.isCellular = path.usesInterfaceType(.cellular)
-                self.isExpensive = path.isExpensive
+            if path.status == .satisfied {
+                // 네트워크 경로가 활성화되면 실제 인터넷 연결 테스트
+                Task {
+                    await self?.testInternetConnection(with: path)
+                }
+            } else {
+                // 네트워크 경로가 없으면 연결 끊김
+                Task { @MainActor in
+                    self?.updateConnectionStatus(isConnected: false)
+                }
             }
         }
         monitor.start(queue: queue)
     }
     
+    private func testInternetConnection(with path: NWPath) {
+        print("🧪 [NetworkMonitor] 인터넷 연결 테스트 시작")
+        print("📡 [NetworkMonitor] 네트워크 경로 상태: \(path.status)")
+        print("📶 [NetworkMonitor] WiFi: \(path.usesInterfaceType(.wifi)), 셀룰러: \(path.usesInterfaceType(.cellular))")
+        
+        internetTestTask?.cancel()
+        internetTestTask = Task {
+            do {
+                // 여러 URL을 순차적으로 테스트
+                var success = false
+                
+                let testUrls = ["https://www.google.com", "https://www.apple.com", "https://1.1.1.1"]
+                
+                for url in testUrls {
+                    if await testSingleUrl(url) {
+                        success = true
+                        break
+                    }
+                }
+                
+                if success {
+                    print("✅ [NetworkMonitor] 인터넷 연결 확인됨")
+                    await MainActor.run {
+                        self.updateConnectionStatus(isConnected: true, path: path)
+                    }
+                } else {
+                    print("❌ [NetworkMonitor] 모든 연결 테스트 실패")
+                    await MainActor.run {
+                        self.updateConnectionStatus(isConnected: false)
+                    }
+                }
+            } catch {
+                print("❌ [NetworkMonitor] 인터넷 테스트 중 예외 발생: \(error)")
+                await MainActor.run {
+                    self.updateConnectionStatus(isConnected: false)
+                }
+            }
+        }
+    }
+    
+    private func testSingleUrl(_ urlString: String) async -> Bool {
+        do {
+            let url = URL(string: urlString)!
+            var request = URLRequest(url: url)
+            request.httpMethod = "HEAD"
+            request.timeoutInterval = 5.0
+            
+            print("🌐 [NetworkMonitor] \(urlString) 테스트 시작...")
+            let start = Date()
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let duration = Date().timeIntervalSince(start)
+            print("⏱️ [NetworkMonitor] \(urlString) 완료 - 소요시간: \(String(format: "%.2f", duration))초")
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                print("📊 [NetworkMonitor] \(urlString) HTTP 응답 코드: \(httpResponse.statusCode)")
+                return httpResponse.statusCode == 200
+            }
+            return false
+        } catch {
+            print("❌ [NetworkMonitor] \(urlString) 실패: \(error)")
+            return false
+        }
+    }
+    
+    @MainActor
+    private func updateConnectionStatus(isConnected: Bool, path: NWPath? = nil) {
+        print("🔄 [NetworkMonitor] 연결 상태 업데이트: isConnected=\(isConnected)")
+        
+        // 강제로 objectWillChange 발생시켜 UI 업데이트 보장
+        objectWillChange.send()
+        
+        self.isConnected = isConnected
+        if isConnected, let path = path {
+            self.isWiFi = path.usesInterfaceType(.wifi)
+            self.isCellular = path.usesInterfaceType(.cellular)
+            self.isExpensive = path.isExpensive
+            print("✅ [NetworkMonitor] 상태 설정 완료 - WiFi: \(self.isWiFi), 셀룰러: \(self.isCellular), 연결됨: \(self.isConnected)")
+        } else {
+            self.isWiFi = false
+            self.isCellular = false
+            self.isExpensive = false
+            print("❌ [NetworkMonitor] 연결 끊김으로 설정 - 모든 플래그 false")
+        }
+        
+        // 추가로 한번 더 강제 업데이트
+        objectWillChange.send()
+    }
+    
     deinit {
+        internetTestTask?.cancel()
         monitor.cancel()
         print("NetworkMonitor deinit - 메모리 해제 완료")
     }
@@ -220,7 +324,7 @@ class AppBundleStorageManager {
 }
 
 // MARK: - Timeout Helper
-func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+func withTimeout<T: Sendable>(seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
     return try await withThrowingTaskGroup(of: T.self) { group in
         group.addTask {
             try await operation()
@@ -392,8 +496,15 @@ class FileSizeChecker {
     
     /// 여러 파일의 크기를 병렬로 가져오는 메서드
     static func getFileSizesBatch(urls: [String]) async throws -> [String: Int64] {
+        print("🚀 [FileSizeChecker] getFileSizesBatch 호출됨 - \(urls.count)개 URL")
+        
         guard !urls.isEmpty else {
+            print("⚠️ [FileSizeChecker] 빈 URL 배열")
             return [:]
+        }
+        
+        for (index, url) in urls.enumerated() {
+            print("📎 [FileSizeChecker] URL \(index + 1): \(url)")
         }
         
         print("🔄 [FileSizeChecker] Batch size check started for \(urls.count) files")
@@ -851,21 +962,22 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     typealias ChunkCompletionHandler = (Result<ChunkInfo, Error>) -> Void
     typealias ChunkProgressHandler = (ChunkInfo, Double) -> Void
     
-    private lazy var urlSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60.0
-        config.timeoutIntervalForResource = 600.0
-        config.httpMaximumConnectionsPerHost = ChunkManager.maxConcurrentChunks
-        config.allowsCellularAccess = true  // 셀룰러 허용으로 변경
-        config.waitsForConnectivity = true
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    private var urlSession: URLSession!
     private var activeDownloads: [String: (task: URLSessionDataTask, chunk: ChunkInfo, data: NSMutableData, completion: ChunkCompletionHandler)] = [:]
     private let maxRetryCount = 3
     
     override init() {
         super.init()
+        
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60.0
+        config.timeoutIntervalForResource = 600.0
+        config.httpMaximumConnectionsPerHost = ChunkManager.maxConcurrentChunks
+        config.allowsCellularAccess = true  // 셀룰러 허용으로 변경
+        config.waitsForConnectivity = false  // 무한 대기 방지
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        
+        self.urlSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
     
     func downloadChunk(_ chunk: ChunkInfo, 
@@ -892,7 +1004,9 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             completion: completion
         )
         
-        print("Starting chunk download: \(chunk.id) (\(chunk.startByte)-\(chunk.endByte))")
+        print("🔄 Starting chunk download: \(chunk.id) (\(chunk.startByte)-\(chunk.endByte)) for file: \(chunk.fileName)")
+        print("🌐 URL: \(chunk.fileUrl)")
+        print("📋 Range: bytes=\(chunk.startByte)-\(chunk.endByte)")
         dataTask.resume()
     }
     
@@ -1059,7 +1173,16 @@ class ParallelChunkDownloadManager: ObservableObject {
             )
         }
         
-        print("Starting parallel chunk download for \(files.count) files")
+        print("🚀 Starting parallel chunk download for \(files.count) files")
+        
+        for (index, fileInfo) in files.enumerated() {
+            print("📄 File \(index + 1): \(fileInfo.fileName) (\(AppBundleStorageManager.formatBytes(fileInfo.totalSize)))")
+        }
+        
+        print("📦 Total file chunks created: \(fileChunks.count)")
+        for (index, fileChunk) in fileChunks.enumerated() {
+            print("  - File \(index + 1): \(fileChunk.fileName) -> \(fileChunk.chunks.count) chunks")
+        }
         
         // Start downloading chunks for all files in parallel
         await withTaskGroup(of: Void.self) { group in
@@ -1556,20 +1679,36 @@ class ModelDownloadManager: ObservableObject {
     
     // MARK: - Setup Methods
     private func setupNetworkMonitoring() {
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            if self.networkMonitor.isConnected {
-                if self.networkMonitor.isWiFi {
-                    self.networkStatusMessage = "WiFi 연결됨"
-                } else if self.networkMonitor.isCellular {
-                    self.networkStatusMessage = self.networkMonitor.isExpensive ? "셀룰러 연결됨 (제한된 데이터)" : "셀룰러 연결됨"
+        print("🔧 [ModelDownloadManager] setupNetworkMonitoring 시작")
+        
+        // NetworkMonitor의 상태 변화를 구독
+        networkMonitor.$isConnected
+            .combineLatest(networkMonitor.$isWiFi, networkMonitor.$isCellular, networkMonitor.$isExpensive)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConnected, isWiFi, isCellular, isExpensive in
+                guard let self = self else { return }
+                
+                print("🔄 [ModelDownloadManager] 네트워크 상태 변화 감지:")
+                print("  - isConnected: \(isConnected)")
+                print("  - isWiFi: \(isWiFi)")
+                print("  - isCellular: \(isCellular)")
+                print("  - isExpensive: \(isExpensive)")
+                
+                if isConnected {
+                    if isWiFi {
+                        self.networkStatusMessage = "WiFi 연결됨"
+                    } else if isCellular {
+                        self.networkStatusMessage = isExpensive ? "셀룰러 연결됨 (제한된 데이터)" : "셀룰러 연결됨"
+                    } else {
+                        self.networkStatusMessage = "인터넷 연결됨"
+                    }
                 } else {
-                    self.networkStatusMessage = "인터넷 연결됨"
+                    self.networkStatusMessage = "인터넷 연결 없음"
                 }
-            } else {
-                self.networkStatusMessage = "인터넷 연결 없음"
+                
+                print("📱 [ModelDownloadManager] UI 상태 메시지 업데이트: \(self.networkStatusMessage)")
             }
-        }
+            .store(in: &cancellables)
     }
     
     private func loadPreviousChunkDownloadState() {
@@ -1746,10 +1885,13 @@ class ModelDownloadManager: ObservableObject {
         // 메인 스레드에서 실행 확인
         assert(Thread.isMainThread, "downloadModel must be called on main thread")
         
-        print("[CHUNK SYSTEM] 청크 기반 다운로드 시작: \(tier.rawValue)")
+        print("🚀 [CHUNK SYSTEM] 청크 기반 다운로드 시작: \(tier.rawValue)")
+        print("📊 [CHUNK SYSTEM] 현재 상태 - isDownloading: \(isDownloading)")
+        print("🌐 [CHUNK SYSTEM] 네트워크 상태 - isConnected: \(networkMonitor.isConnected), isWiFi: \(networkMonitor.isWiFi), isCellular: \(networkMonitor.isCellular)")
         
         // 네트워크 연결 확인
         guard networkMonitor.isConnected else {
+            print("❌ [CHUNK SYSTEM] 네트워크 연결 없음")
             errorMessage = DownloadError.networkUnavailable.localizedDescription
             return
         }
@@ -1786,33 +1928,50 @@ class ModelDownloadManager: ObservableObject {
             (tier.tokenizerFileUrl, "tokenizer.json")
         ]
         
+        print("📁 [CHUNK SYSTEM] 다운로드할 파일 목록:")
+        for (index, file) in filesToDownload.enumerated() {
+            print("  \(index + 1). \(file.1) - \(file.0)")
+        }
+        
         // 청크 기반 다운로드 시작
+        print("🎯 [CHUNK SYSTEM] Task 생성 중...")
         Task {
+            print("✅ [CHUNK SYSTEM] Task 시작됨")
             await startChunkBasedDownload(tier: tier, modelDir: modelDir)
+            print("🏁 [CHUNK SYSTEM] Task 완료됨")
         }
     }
     
     // MARK: - Chunk-Based Download Implementation
     private func startChunkBasedDownload(tier: ModelTier, modelDir: URL) async {
+        print("🔥 [CHUNK] startChunkBasedDownload 시작")
         do {
             // 1. 실제 파일 크기 확인 (HEAD 요청) - 에러 핸들링 개선
+            print("📏 [CHUNK] 파일 크기 확인 시작")
             await MainActor.run { currentFileName = "파일 크기 확인 중..." }
             
             let urls = filesToDownload.map { $0.url }
             guard !urls.isEmpty else {
+                print("❌ [CHUNK] 빈 URL 목록")
                 throw DownloadError.invalidURL("빈 URL 목록")
             }
             
+            print("🌐 [CHUNK] FileSizeChecker.getFileSizesBatch 호출 - URLs: \(urls.count)개")
             actualFileSizes = try await FileSizeChecker.getFileSizesBatch(urls: urls)
+            print("✅ [CHUNK] 파일 크기 확인 완료: \(actualFileSizes.count)개")
             
             // 파일 크기 유효성 검증
+            print("🔍 [CHUNK] 파일 크기 유효성 검증 시작")
             for (url, size) in actualFileSizes {
+                print("📊 [CHUNK] 검증 중: \(url) -> \(size) bytes")
                 guard size > 0 else {
+                    print("❌ [CHUNK] 파일 크기 0 또는 음수: \(url)")
                     throw DownloadError.fileSizeNotAvailable
                 }
             }
+            print("✅ [CHUNK] 모든 파일 크기 유효성 검증 완료")
             
-            print("실제 파일 크기 확인 완료:")
+            print("📋 [CHUNK] 실제 파일 크기 확인 완료:")
             for (url, size) in actualFileSizes {
                 let fileName = URL(string: url)?.lastPathComponent ?? "unknown"
                 print("  - \(fileName): \(AppBundleStorageManager.formatBytes(size))")
@@ -2610,7 +2769,9 @@ struct ContentView: View {
     private func modelTierButton(tier: ModelTier) -> some View {
         Button {
             print("버튼 클릭: \(tier.rawValue)")
-            downloader.downloadModel(tier: tier)
+            Task {
+                await downloader.downloadModel(tier: tier)
+            }
         } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
