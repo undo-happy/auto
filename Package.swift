@@ -33,7 +33,8 @@ let package = Package(
                 "MLModel",
                 "NetworkManager",
                 .product(name: "RealmSwift", package: "realm-swift")
-            ]
+            ],
+            sources: ["OfflineChatbot", "Exports.swift"]
         ),
         .target(
             name: "MLModel",
