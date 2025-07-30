@@ -1112,19 +1112,19 @@ class ParallelChunkDownloadManager: ObservableObject {
         }
 
         print("🚀 Starting chunk download for file: \(fileChunk.fileName) (\(fileChunk.chunks.count) chunks)")
-
+        
         // Download chunks with concurrency control - 수정된 버전
         await withTaskGroup(of: Void.self) { group in
             let maxConcurrency = min(maxConcurrentChunks, fileChunk.chunks.count)
             var submittedTasks = 0
-
+            
             for chunkIndex in fileChunk.chunks.indices {
                 group.addTask { [weak self] in
                     guard let self = self else { return }
                     await self.downloadSingleChunk(fileIndex: fileIndex, chunkIndex: chunkIndex)
                 }
                 submittedTasks += 1
-
+                
                 // 동시 실행 수 제한 - 올바른 방법
                 if submittedTasks >= maxConcurrency {
                     await group.next() // 하나 완료될 때까지 기다림
@@ -1335,6 +1335,25 @@ class ParallelChunkDownloadManager: ObservableObject {
         }
 
         totalBytesDownloaded = max(totalBytesDownloaded, downloadedBytes) // 역행 방지
+    }
+
+    func pauseDownload() {
+        print("🔄 [PAUSE] Pausing chunk downloads...")
+        isDownloading = false
+        
+        // Cancel all active downloads but keep state for resuming
+        chunkDownloader.cancelAllDownloads()
+        
+        // Mark in-progress chunks as paused
+        for fileIndex in fileChunks.indices {
+            for chunkIndex in fileChunks[fileIndex].chunks.indices {
+                if fileChunks[fileIndex].chunks[chunkIndex].isInProgress && !fileChunks[fileIndex].chunks[chunkIndex].isCompleted {
+                    fileChunks[fileIndex].chunks[chunkIndex].isPaused = true
+                }
+            }
+        }
+        
+        print("✅ [PAUSE] Chunk downloads paused")
     }
 
     func cancelDownload() {
@@ -2272,6 +2291,9 @@ class ModelDownloadManager: ObservableObject {
         
         print("🔄 [PAUSE] Pausing downloads...")
         isDownloading = false
+        
+        // 실제 청크 다운로드 일시정지
+        chunkDownloadManager.pauseDownload()
         
         canResume = true
         
