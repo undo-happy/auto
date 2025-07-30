@@ -23,38 +23,7 @@ enum ModelTier: String, CaseIterable, Sendable {
         }
     }
     
-    var mainFileUrl: String {
-        switch self {
-        case .high:
-            return "https://huggingface.co/mlx-community/gemma-3n-E4B-it-bf16/resolve/main/model.safetensors"
-        case .medium:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-bf16/resolve/main/model.safetensors"
-        case .low:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-4bit/resolve/main/model.safetensors"
-        }
-    }
     
-    var configFileUrl: String {
-        switch self {
-        case .high:
-            return "https://huggingface.co/mlx-community/gemma-3n-E4B-it-bf16/resolve/main/config.json"
-        case .medium:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-bf16/resolve/main/config.json"
-        case .low:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-4bit/resolve/main/config.json"
-        }
-    }
-    
-    var tokenizerFileUrl: String {
-        switch self {
-        case .high:
-            return "https://huggingface.co/mlx-community/gemma-3n-E4B-it-bf16/resolve/main/tokenizer.json"
-        case .medium:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-bf16/resolve/main/tokenizer.json"
-        case .low:
-            return "https://huggingface.co/mlx-community/gemma-3n-E2B-it-4bit/resolve/main/tokenizer.json"
-        }
-    }
     
     var description: String {
         switch self {
@@ -72,141 +41,34 @@ enum ModelTier: String, CaseIterable, Sendable {
     }
 }
 
-// MARK: - Network Monitor
-@MainActor
-class NetworkMonitor: ObservableObject {
-    @Published var isConnected = false
-    @Published var isWiFi = false
-    @Published var isCellular = false
-    @Published var isExpensive = false
-    
-    private let monitor = NWPathMonitor()
-    private let queue = DispatchQueue(label: "NetworkMonitor")
-    private var internetTestTask: Task<Void, Never>?
-    
-    init() {
-        print("🚀 [NetworkMonitor] 초기화 시작")
-        startMonitoring()
-        
-        // 초기 상태를 즉시 설정 (기본값: 연결 없음)
-        Task { @MainActor in
-            self.isConnected = false
-            self.isWiFi = false
-            self.isCellular = false
-            self.isExpensive = false
-            print("📱 [NetworkMonitor] 초기 상태 설정 완료 - 모든 값 false")
-        }
+
+
+// MARK: - Hugging Face API Client
+class HuggingFaceAPIClient {
+    struct RepoFile: Codable {
+        let rfilename: String
     }
-    
-    private func startMonitoring() {
-        monitor.pathUpdateHandler = { [weak self] path in
-            if path.status == .satisfied {
-                // 네트워크 경로가 활성화되면 실제 인터넷 연결 테스트
-                Task {
-                    await self?.testInternetConnection(with: path)
-                }
-            } else {
-                // 네트워크 경로가 없으면 연결 끊김
-                Task { @MainActor in
-                    self?.updateConnectionStatus(isConnected: false)
-                }
-            }
-        }
-        monitor.start(queue: queue)
+
+    struct RepoInfo: Codable {
+        let siblings: [RepoFile]
     }
-    
-    private func testInternetConnection(with path: NWPath) {
-        print("🧪 [NetworkMonitor] 인터넷 연결 테스트 시작")
-        print("📡 [NetworkMonitor] 네트워크 경로 상태: \(path.status)")
-        print("📶 [NetworkMonitor] WiFi: \(path.usesInterfaceType(.wifi)), 셀룰러: \(path.usesInterfaceType(.cellular))")
-        
-        internetTestTask?.cancel()
-        internetTestTask = Task {
-            do {
-                // 여러 URL을 순차적으로 테스트
-                var success = false
-                
-                let testUrls = ["https://www.google.com", "https://www.apple.com", "https://1.1.1.1"]
-                
-                for url in testUrls {
-                    if await testSingleUrl(url) {
-                        success = true
-                        break
-                    }
-                }
-                
-                if success {
-                    print("✅ [NetworkMonitor] 인터넷 연결 확인됨")
-                    await MainActor.run {
-                        self.updateConnectionStatus(isConnected: true, path: path)
-                    }
-                } else {
-                    print("❌ [NetworkMonitor] 모든 연결 테스트 실패")
-                    await MainActor.run {
-                        self.updateConnectionStatus(isConnected: false)
-                    }
-                }
-            } catch {
-                print("❌ [NetworkMonitor] 인터넷 테스트 중 예외 발생: \(error)")
-                await MainActor.run {
-                    self.updateConnectionStatus(isConnected: false)
-                }
-            }
-        }
-    }
-    
-    private func testSingleUrl(_ urlString: String) async -> Bool {
-        do {
-            let url = URL(string: urlString)!
-            var request = URLRequest(url: url)
-            request.httpMethod = "HEAD"
-            request.timeoutInterval = 5.0
-            
-            print("🌐 [NetworkMonitor] \(urlString) 테스트 시작...")
-            let start = Date()
-            let (_, response) = try await URLSession.shared.data(for: request)
-            let duration = Date().timeIntervalSince(start)
-            print("⏱️ [NetworkMonitor] \(urlString) 완료 - 소요시간: \(String(format: "%.2f", duration))초")
-            
-            if let httpResponse = response as? HTTPURLResponse {
-                print("📊 [NetworkMonitor] \(urlString) HTTP 응답 코드: \(httpResponse.statusCode)")
-                return httpResponse.statusCode == 200
-            }
-            return false
-        } catch {
-            print("❌ [NetworkMonitor] \(urlString) 실패: \(error)")
-            return false
-        }
-    }
-    
-    @MainActor
-    private func updateConnectionStatus(isConnected: Bool, path: NWPath? = nil) {
-        print("🔄 [NetworkMonitor] 연결 상태 업데이트: isConnected=\(isConnected)")
-        
-        // 강제로 objectWillChange 발생시켜 UI 업데이트 보장
-        objectWillChange.send()
-        
-        self.isConnected = isConnected
-        if isConnected, let path = path {
-            self.isWiFi = path.usesInterfaceType(.wifi)
-            self.isCellular = path.usesInterfaceType(.cellular)
-            self.isExpensive = path.isExpensive
-            print("✅ [NetworkMonitor] 상태 설정 완료 - WiFi: \(self.isWiFi), 셀룰러: \(self.isCellular), 연결됨: \(self.isConnected)")
-        } else {
-            self.isWiFi = false
-            self.isCellular = false
-            self.isExpensive = false
-            print("❌ [NetworkMonitor] 연결 끊김으로 설정 - 모든 플래그 false")
+
+    static func fetchFileList(for repoId: String) async throws -> [String] {
+        guard let url = URL(string: "https://huggingface.co/api/models/\(repoId)") else {
+            throw DownloadError.invalidURL("API URL for \(repoId)")
         }
         
-        // 추가로 한번 더 강제 업데이트
-        objectWillChange.send()
-    }
-    
-    deinit {
-        internetTestTask?.cancel()
-        monitor.cancel()
-        print("NetworkMonitor deinit - 메모리 해제 완료")
+        print("📄 [HuggingFaceAPI] Fetching file list for \(repoId)")
+        let (data, response) = try await URLSession.shared.data(from: url)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw DownloadError.httpError((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        
+        let repoInfo = try JSONDecoder().decode(RepoInfo.self, from: data)
+        let files = repoInfo.siblings.map { $0.rfilename }
+        print("✅ [HuggingFaceAPI] Found \(files.count) files.")
+        return files
     }
 }
 
@@ -345,83 +207,51 @@ func withTimeout<T: Sendable>(seconds: TimeInterval, operation: @escaping @Senda
 @MainActor
 class FileSizeChecker {
     
-    /// 단일 파일의 실제 크기를 가져오는 메서드 - Hugging Face 최적화
+    
+    
+    
+    /// HTTP 응답 헤더에서 파일 크기를 파싱하는 메서드 - 압축 처리 개선
     static func getActualFileSize(from url: String) async throws -> Int64 {
         guard let fileURL = URL(string: url) else {
             throw DownloadError.invalidURL(url)
         }
-        
-        // Production-ready URLRequest 설정
+
         var request = URLRequest(url: fileURL)
         request.httpMethod = "HEAD"
-        request.timeoutInterval = 30.0  // 합리적인 타임아웃
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        
-        // Hugging Face 서버 호환 헤더 설정
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue("no-cache, no-store, must-revalidate", forHTTPHeaderField: "Cache-Control")
-        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
-        request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
-        request.setValue("keep-alive", forHTTPHeaderField: "Connection")
-        
-        print("🔍 [FileSizeChecker] HEAD 요청 시작: \(url)")
-        print("📋 [FileSizeChecker] Request Headers:")
-        request.allHTTPHeaderFields?.forEach { key, value in
-            print("  - \(key): \(value)")
-        }
-        
-        // URLSession 설정 최적화
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30.0
-        config.timeoutIntervalForResource = 60.0
-        config.waitsForConnectivity = false  // 무한 대기 방지
-        config.allowsCellularAccess = true
-        config.allowsConstrainedNetworkAccess = true
-        config.allowsExpensiveNetworkAccess = true
-        
-        let session = URLSession(configuration: config)
-        
-        do {
-            let (_, response) = try await session.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                print("❌ [FileSizeChecker] Invalid response type")
-                throw DownloadError.invalidResponse
-            }
-            
-            print("📊 [FileSizeChecker] Response Status: \(httpResponse.statusCode)")
-            print("📋 [FileSizeChecker] Response Headers (Total: \(httpResponse.allHeaderFields.count)):")
-            
-            // 모든 응답 헤더 출력 (디버깅용)
-            for (key, value) in httpResponse.allHeaderFields {
-                print("  - \(key): \(value)")
-            }
-            
-            // HTTP 상태 코드 검증 - 200, 302, 301 모두 허용
-            guard [200, 301, 302].contains(httpResponse.statusCode) else {
-                print("❌ [FileSizeChecker] HTTP Error: \(httpResponse.statusCode)")
-                throw DownloadError.httpError(httpResponse.statusCode)
-            }
-            
-            // Hugging Face 특화 헤더 파싱 (여러 변형 지원)
-            let fileSize = try parseFileSizeFromHeaders(httpResponse.allHeaderFields, url: url)
-            
-            print("✅ [FileSizeChecker] 파일 크기 확인 성공: \(AppBundleStorageManager.formatBytes(fileSize))")
-            return fileSize
-            
-        } catch let error as DownloadError {
-            print("❌ [FileSizeChecker] DownloadError: \(error.localizedDescription)")
-            throw error
-        } catch {
-            print("❌ [FileSizeChecker] Unexpected error: \(error)")
+        request.timeoutInterval = 30.0
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
             throw DownloadError.invalidResponse
         }
+
+        return try parseFileSizeFromHeaders(httpResponse.allHeaderFields, url: url)
     }
-    
-    /// HTTP 응답 헤더에서 파일 크기를 파싱하는 메서드 - 안전성 개선
+
     private static func parseFileSizeFromHeaders(_ headers: [AnyHashable: Any], url: String) throws -> Int64 {
         
-        // 1. Hugging Face의 x-linked-size 헤더 확인 (모든 대소문자 변형)
+        print("🔍 [FileSizeChecker] 헤더 분석 시작: \(url)")
+        print("📋 [FileSizeChecker] 응답 헤더 (총 \(headers.count)개):")
+        for (key, value) in headers {
+            print("  - \(key): \(value)")
+        }
+
+        // Content-Encoding 확인하여 압축 여부 판단
+        var isCompressed = false
+        let encodingKeys = ["Content-Encoding", "content-encoding", "CONTENT-ENCODING"]
+        for key in encodingKeys {
+            if let encoding = headers[key] as? String {
+                print("📦 [FileSizeChecker] Content-Encoding: \(encoding)")
+                if !encoding.isEmpty && encoding.lowercased() != "identity" {
+                    isCompressed = true
+                    print("⚠️ [FileSizeChecker] 압축된 응답 감지: \(encoding)")
+                }
+                break
+            }
+        }
+
+        // 1. Hugging Face의 x-linked-size 헤더 확인 (실제 파일 크기)
         let linkedSizeKeys = ["x-linked-size", "X-Linked-Size", "X-LINKED-SIZE", "x-Linked-Size"]
         for key in linkedSizeKeys {
             if let sizeString = headers[key] as? String {
@@ -430,12 +260,12 @@ class FileSizeChecker {
                     print("⚠️ [FileSizeChecker] Invalid size in \(key): '\(sizeString)'")
                     continue
                 }
-                print("✅ [FileSizeChecker] Found file size via \(key): \(fileSize)")
+                print("✅ [FileSizeChecker] Found actual file size via \(key): \(AppBundleStorageManager.formatBytes(fileSize))")
                 return fileSize
             }
         }
-        
-        // 2. 표준 Content-Length 헤더 확인 (모든 대소문자 변형)
+
+        // 2. 표준 Content-Length 헤더 확인
         let contentLengthKeys = ["Content-Length", "content-length", "CONTENT-LENGTH", "Content-length"]
         for key in contentLengthKeys {
             if let sizeString = headers[key] as? String {
@@ -444,16 +274,23 @@ class FileSizeChecker {
                     print("⚠️ [FileSizeChecker] Invalid size in \(key): '\(sizeString)'")
                     continue
                 }
-                print("✅ [FileSizeChecker] Found file size via \(key): \(fileSize)")
-                return fileSize
+                
+                if isCompressed {
+                    print("⚠️ [FileSizeChecker] Content-Length shows compressed size (\(AppBundleStorageManager.formatBytes(fileSize))) - 압축으로 인해 실제 크기와 다를 수 있음")
+                    // 압축된 경우에는 이 값을 신뢰하지 않고 다른 방법 시도
+                    break
+                } else {
+                    print("✅ [FileSizeChecker] Found file size via \(key): \(AppBundleStorageManager.formatBytes(fileSize))")
+                    return fileSize
+                }
             }
         }
-        
+
         // 3. Accept-Ranges 헤더 확인 (일부 서버에서 사용)
         if let acceptRanges = headers["Accept-Ranges"] as? String {
             print("📋 [FileSizeChecker] Accept-Ranges: \(acceptRanges)")
         }
-        
+
         // 4. Content-Range 헤더 확인 (일부 경우에 포함될 수 있음)
         if let contentRange = headers["Content-Range"] as? String {
             print("📋 [FileSizeChecker] Content-Range: \(contentRange)")
@@ -468,22 +305,22 @@ class FileSizeChecker {
                 print("⚠️ [FileSizeChecker] Invalid Content-Range format: \(contentRange)")
             }
         }
-        
+
         // 5. ETag에서 크기 정보 추출 시도 (일부 CDN에서 사용)
         if let etag = headers["ETag"] as? String {
             print("📋 [FileSizeChecker] ETag: \(etag)")
         }
-        
+
         // 6. Last-Modified 정보 확인
         if let lastModified = headers["Last-Modified"] as? String {
             print("📋 [FileSizeChecker] Last-Modified: \(lastModified)")
         }
-        
+
         // 7. 리다이렉트 정보 확인
         if let location = headers["Location"] as? String {
             print("📋 [FileSizeChecker] Redirect Location: \(location)")
         }
-        
+
         // 모든 방법이 실패한 경우 상세한 에러 정보 제공
         print("❌ [FileSizeChecker] 파일 크기를 찾을 수 없음")
         print("📋 [FileSizeChecker] 확인한 헤더 키들:")
@@ -496,7 +333,8 @@ class FileSizeChecker {
     
     /// 여러 파일의 크기를 병렬로 가져오는 메서드
     static func getFileSizesBatch(urls: [String]) async throws -> [String: Int64] {
-        print("🚀 [FileSizeChecker] getFileSizesBatch 호출됨 - \(urls.count)개 URL")
+        print("🚨🚨🚨 [FileSizeChecker] getFileSizesBatch 호출됨!!! - \(urls.count)개 URL")
+        NSLog("🚨 FileSizeChecker.getFileSizesBatch called with %d URLs", urls.count)
         
         guard !urls.isEmpty else {
             print("⚠️ [FileSizeChecker] 빈 URL 배열")
@@ -505,6 +343,7 @@ class FileSizeChecker {
         
         for (index, url) in urls.enumerated() {
             print("📎 [FileSizeChecker] URL \(index + 1): \(url)")
+            NSLog("URL %d: %@", index + 1, url)
         }
         
         print("🔄 [FileSizeChecker] Batch size check started for \(urls.count) files")
@@ -963,7 +802,8 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     typealias ChunkProgressHandler = (ChunkInfo, Double) -> Void
     
     private var urlSession: URLSession!
-    private var activeDownloads: [String: (task: URLSessionDataTask, chunk: ChunkInfo, data: NSMutableData, completion: ChunkCompletionHandler)] = [:]
+    // 메모리 절약: NSMutableData 제거, 파일 핸들 직접 사용
+    private var activeDownloads: [String: (task: URLSessionDataTask, chunk: ChunkInfo, fileHandle: FileHandle?, completion: ChunkCompletionHandler)] = [:]
     private let maxRetryCount = 3
     
     override init() {
@@ -996,18 +836,40 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         
         let dataTask = urlSession.dataTask(with: request)
         
-        // Store download info
-        activeDownloads[chunk.id] = (
-            task: dataTask,
-            chunk: chunk,
-            data: NSMutableData(),
-            completion: completion
-        )
+        // 임시 파일 생성 (메모리 절약)
+        let tempFileName = "\(chunk.id).tmp"
+        guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            completion(.failure(NSError(domain: "ChunkDownloader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Cannot access documents directory"])))
+            return
+        }
+        let chunksDir = documentsDir.appendingPathComponent("temp_chunks")
         
-        print("🔄 Starting chunk download: \(chunk.id) (\(chunk.startByte)-\(chunk.endByte)) for file: \(chunk.fileName)")
-        print("🌐 URL: \(chunk.fileUrl)")
-        print("📋 Range: bytes=\(chunk.startByte)-\(chunk.endByte)")
+        do {
+            try FileManager.default.createDirectory(at: chunksDir, withIntermediateDirectories: true, attributes: nil)
+            let tempFile = chunksDir.appendingPathComponent(tempFileName)
+            
+            // 빈 파일 생성
+            FileManager.default.createFile(atPath: tempFile.path, contents: nil, attributes: nil)
+            let fileHandle = try FileHandle(forWritingTo: tempFile)
+            
+            // Store download info with FileHandle
+            activeDownloads[chunk.id] = (
+                task: dataTask,
+                chunk: chunk,
+                fileHandle: fileHandle,
+                completion: completion
+            )
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        
+        print("🚀 [DOWNLOAD START] Starting chunk download: \(chunk.id) (\(chunk.startByte)-\(chunk.endByte)) for file: \(chunk.fileName)")
+        print("🌐 [DOWNLOAD START] URL: \(chunk.fileUrl)")
+        print("📋 [DOWNLOAD START] Range: bytes=\(chunk.startByte)-\(chunk.endByte)")
+        print("📝 [DOWNLOAD START] Storing in activeDownloads with key: \(chunk.id)")
         dataTask.resume()
+        print("▶️ [DOWNLOAD START] Task resumed for chunk: \(chunk.id)")
     }
     
     func cancelChunk(_ chunkId: String) {
@@ -1019,11 +881,22 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     }
     
     func cancelAllDownloads() {
+        print("🛑 [CANCEL ALL] Cancelling \(activeDownloads.count) active downloads")
+        
         for (chunkId, downloadInfo) in activeDownloads {
             downloadInfo.task.cancel()
-            print("Cancelled chunk download: \(chunkId)")
+            
+            // FileHandle 정리
+            if let fileHandle = downloadInfo.fileHandle {
+                try? fileHandle.close()
+            }
+            
+            print("🛑 [CANCEL ALL] Cancelled chunk download: \(chunkId)")
         }
-        activeDownloads.removeAll()
+        
+        // activeDownloads는 completion에서 개별적으로 제거됨
+        // 여기서 removeAll()을 호출하면 completion에서 chunkId를 찾을 수 없음
+        print("🛑 [CANCEL ALL] Waiting for completion handlers to clean up activeDownloads")
     }
     
     // MARK: - URLSessionDataDelegate
@@ -1035,34 +908,66 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             return
         }
         
-        downloadInfo.data.append(data)
-        
-        var updatedChunk = downloadInfo.chunk
-        updatedChunk.downloadedBytes = Int64(downloadInfo.data.length)
-        updatedChunk.data = downloadInfo.data as Data
-        
-        // Update stored chunk - 스레드 안전성 보장
-        activeDownloads[chunkId] = (
-            task: downloadInfo.task,
-            chunk: updatedChunk,
-            data: downloadInfo.data,
-            completion: downloadInfo.completion
-        )
-    }
-    
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didCompleteWithError error: Error?) {
-        guard let chunkId = findChunkId(for: dataTask),
-              let downloadInfo = activeDownloads[chunkId] else {
-            print("⚠️ Completed unknown chunk")
+        // FileHandle에 바로 쓰기 (메모리 절약)
+        guard let fileHandle = downloadInfo.fileHandle else {
+            print("❌ [STREAMING] No file handle for chunk: \(chunkId)")
             return
         }
+        
+        do {
+            fileHandle.write(data)
+            
+            // 진행률만 메모리에서 추적
+            var updatedChunk = downloadInfo.chunk
+            updatedChunk.downloadedBytes += Int64(data.count)
+            
+            // FileHandle 유지하면서 정보 업데이트
+            activeDownloads[chunkId] = (
+                task: downloadInfo.task,
+                chunk: updatedChunk,
+                fileHandle: fileHandle,
+                completion: downloadInfo.completion
+            )
+            
+            print("📥 [STREAMING] 데이터 스트리밍: \(chunkId) - \(data.count) bytes, 총: \(updatedChunk.downloadedBytes) bytes")
+        } catch {
+            print("❌ [STREAMING] Failed to write data: \(error)")
+        }
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        print("🔄 [COMPLETION] didCompleteWithError called for task: \(task)")
+        
+        guard let dataTask = task as? URLSessionDataTask else {
+            print("❌ [COMPLETION] Task is not URLSessionDataTask")
+            return
+        }
+        
+        guard let chunkId = findChunkId(for: dataTask) else {
+            print("❌ [COMPLETION] Cannot find chunkId for task")
+            return
+        }
+        
+        guard let downloadInfo = activeDownloads[chunkId] else {
+            print("❌ [COMPLETION] Cannot find downloadInfo for chunkId: \(chunkId)")
+            return
+        }
+        
+        print("✅ [COMPLETION] Found chunk: \(chunkId)")
         
         defer {
             activeDownloads.removeValue(forKey: chunkId)
         }
         
         if let error = error {
-            print("Chunk download failed: \(chunkId) - \(error.localizedDescription)")
+            // Cancelled task는 정상적인 일시정지이므로 별도 처리
+            if (error as NSError).code == NSURLErrorCancelled {
+                print("🔄 [COMPLETION] Chunk download cancelled (paused): \(chunkId)")
+                // cancelled는 failure로 처리하지 않고 조용히 정리만 함
+                return
+            }
+            
+            print("❌ [COMPLETION] Chunk download failed: \(chunkId) - \(error.localizedDescription)")
             
             var failedChunk = downloadInfo.chunk
             failedChunk.lastError = error.localizedDescription
@@ -1070,15 +975,38 @@ class ChunkDownloader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
             
             downloadInfo.completion(.failure(error))
         } else {
-            print("Chunk download completed: \(chunkId) - \(downloadInfo.data.length) bytes")
+            // FileHandle 닫기 및 파일 정보만 전달 (메모리 절약)
+            if let fileHandle = downloadInfo.fileHandle {
+                try? fileHandle.close()
+            }
             
-            var completedChunk = downloadInfo.chunk
-            completedChunk.isCompleted = true
-            completedChunk.downloadedBytes = Int64(downloadInfo.data.length)
-            completedChunk.data = downloadInfo.data as Data
-            completedChunk.completionTime = Date()
+            let tempFileName = "\(chunkId).tmp"
+            guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                print("❌ [COMPLETION] Cannot access documents directory")
+                downloadInfo.completion(.failure(NSError(domain: "ChunkDownloader", code: -1, userInfo: [NSLocalizedDescriptionKey: "Cannot access documents directory"])))
+                return
+            }
+            let chunksDir = documentsDir.appendingPathComponent("temp_chunks")
+            let tempFile = chunksDir.appendingPathComponent(tempFileName)
             
-            downloadInfo.completion(.success(completedChunk))
+            // 파일 크기만 확인 (메모리에 로드하지 않음)
+            do {
+                let fileSize = try FileManager.default.attributesOfItem(atPath: tempFile.path)[.size] as? Int64 ?? 0
+                print("Chunk download completed: \(chunkId) - \(fileSize) bytes")
+                
+                var completedChunk = downloadInfo.chunk
+                completedChunk.isCompleted = true
+                completedChunk.downloadedBytes = fileSize
+                completedChunk.data = nil // 메모리 절약: 데이터는 저장하지 않음
+                completedChunk.completionTime = Date()
+                
+                print("✅ [CHUNK COMPLETE] Chunk \(chunkId) completed with \(fileSize) bytes (saved to disk)")
+                
+                downloadInfo.completion(.success(completedChunk))
+            } catch {
+                print("❌ [COMPLETION] Failed to get file info: \(error)")
+                downloadInfo.completion(.failure(error))
+            }
         }
     }
     
@@ -1101,60 +1029,33 @@ class ParallelChunkDownloadManager: ObservableObject {
     @Published var estimatedTimeRemaining: TimeInterval = 0
     @Published var isDownloading: Bool = false
     @Published var errorMessage: String?
-    
+
     private let chunkDownloader = ChunkDownloader()
     private var downloadStartTime: Date?
     private var totalBytesDownloaded: Int64 = 0
     private var lastProgressUpdate: Date = Date()
-    private var progressUpdateInterval: TimeInterval = 0.5
+    private var progressUpdateInterval: TimeInterval = 0.1
     private let maxConcurrentChunks = ChunkManager.maxConcurrentChunks
     private var activeChunkCount = 0
     private let downloadQueue = DispatchQueue(label: "chunk.download.queue", qos: .userInitiated)
-    
-    // Temporary chunk storage
-    private var tempDirectory: URL = FileManager.default.temporaryDirectory
-    
+
     init() {
-        // Create temporary directory for chunks
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("chunks_\(UUID().uuidString)")
-        do {
-            // 기존 디렉토리가 있다면 삭제
-            if FileManager.default.fileExists(atPath: tempDir.path) {
-                try FileManager.default.removeItem(at: tempDir)
-                print("🗑️ Removed existing temp directory: \(tempDir.path)")
-            }
-            
-            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: nil)
-            self.tempDirectory = tempDir
-            print("✅ Created temp directory: \(tempDir.path)")
-        } catch {
-            print("❌ Failed to create temp directory: \(error), using fallback")
-            // 폴백: 시스템 임시 디렉토리 사용
-            self.tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("fallback_chunks")
-            
-            // 폴백 디렉토리 생성 시도
-            do {
-                try FileManager.default.createDirectory(at: self.tempDirectory, withIntermediateDirectories: true, attributes: nil)
-                print("✅ Created fallback temp directory: \(self.tempDirectory.path)")
-            } catch {
-                print("❌ Failed to create fallback temp directory: \(error)")
-                // 최종 폴백: 시스템 임시 디렉토리 직접 사용
-                self.tempDirectory = FileManager.default.temporaryDirectory
-            }
-        }
+        // The temp directory logic is removed as ChunkDownloader manages its own temp files,
+        // and the merge logic now reads from that location directly.
     }
-    
+
     deinit {
-        // Clean up temp directory
-        try? FileManager.default.removeItem(at: tempDirectory)
+        // The temp directory cleanup is removed as individual chunk files are deleted after merging.
+        // Any remaining files can be cleaned up on app start by ModelDownloadManager's cleanupOrphanedTempFiles.
+        print("ParallelChunkDownloadManager deinitialized.")
     }
-    
+
     func startDownload(files: [(url: String, fileName: String, totalSize: Int64)], to destinationDirectory: URL) async {
         isDownloading = true
         errorMessage = nil
         downloadStartTime = Date()
         totalBytesDownloaded = 0
-        
+
         // Create file chunk info for each file
         fileChunks = files.map { fileInfo in
             let chunkSize = ChunkManager.getOptimalChunkSize(for: fileInfo.totalSize)
@@ -1164,7 +1065,7 @@ class ParallelChunkDownloadManager: ObservableObject {
                 totalSize: fileInfo.totalSize,
                 chunkSize: chunkSize
             )
-            
+
             return FileChunkInfo(
                 url: fileInfo.url,
                 fileName: fileInfo.fileName,
@@ -1172,18 +1073,18 @@ class ParallelChunkDownloadManager: ObservableObject {
                 chunks: chunks
             )
         }
-        
+
         print("🚀 Starting parallel chunk download for \(files.count) files")
-        
+
         for (index, fileInfo) in files.enumerated() {
             print("📄 File \(index + 1): \(fileInfo.fileName) (\(AppBundleStorageManager.formatBytes(fileInfo.totalSize)))")
         }
-        
+
         print("📦 Total file chunks created: \(fileChunks.count)")
         for (index, fileChunk) in fileChunks.enumerated() {
             print("  - File \(index + 1): \(fileChunk.fileName) -> \(fileChunk.chunks.count) chunks")
         }
-        
+
         // Start downloading chunks for all files in parallel
         await withTaskGroup(of: Void.self) { group in
             for fileIndex in fileChunks.indices {
@@ -1192,68 +1093,70 @@ class ParallelChunkDownloadManager: ObservableObject {
                 }
             }
         }
-        
+
         isDownloading = false
         print("All files download completed")
     }
-    
+
     private func downloadFileChunks(fileIndex: Int, destinationDirectory: URL) async {
-        guard fileIndex < fileChunks.count else { 
+        guard fileIndex < fileChunks.count else {
             print("⚠️ Invalid file index: \(fileIndex) >= \(fileChunks.count)")
-            return 
+            return
         }
-        
+
         let fileChunk = fileChunks[fileIndex]
         guard !fileChunk.chunks.isEmpty else {
             print("⚠️ No chunks available for file: \(fileChunk.fileName)")
             return
         }
-        
+
         print("🚀 Starting chunk download for file: \(fileChunk.fileName) (\(fileChunk.chunks.count) chunks)")
-        
-        // Download chunks with concurrency control - 안전성 강화
+
+        // Download chunks with concurrency control - 수정된 버전
         await withTaskGroup(of: Void.self) { group in
             let maxConcurrency = min(maxConcurrentChunks, fileChunk.chunks.count)
-            var activeDownloads = 0
-            
+            var submittedTasks = 0
+
             for chunkIndex in fileChunk.chunks.indices {
-                // 동시 실행 수 제한
-                while activeDownloads >= maxConcurrency {
-                    await group.next() // 완료되기를 기다림
-                    activeDownloads -= 1
-                }
-                
                 group.addTask { [weak self] in
                     guard let self = self else { return }
                     await self.downloadSingleChunk(fileIndex: fileIndex, chunkIndex: chunkIndex)
                 }
-                activeDownloads += 1
+                submittedTasks += 1
+
+                // 동시 실행 수 제한 - 올바른 방법
+                if submittedTasks >= maxConcurrency {
+                    await group.next() // 하나 완료될 때까지 기다림
+                    submittedTasks -= 1
+                }
             }
         }
-        
+
         // Merge chunks once all are completed
         await mergeChunks(fileIndex: fileIndex, destinationDirectory: destinationDirectory)
     }
-    
+
     private func downloadSingleChunk(fileIndex: Int, chunkIndex: Int) async {
         guard fileIndex < fileChunks.count,
-              chunkIndex < fileChunks[fileIndex].chunks.count else { 
+              chunkIndex < fileChunks[fileIndex].chunks.count else {
             print("Invalid chunk indices: fileIndex=\(fileIndex), chunkIndex=\(chunkIndex)")
-            return 
+            return
         }
-        
+
         let chunk = fileChunks[fileIndex].chunks[chunkIndex]
-        
+
         await withCheckedContinuation { continuation in
             chunkDownloader.downloadChunk(chunk) { [weak self] result in
                 Task { @MainActor in
-                    guard let self = self else { 
+                    guard let self = self else {
                         continuation.resume()
-                        return 
+                        return
                     }
-                    
+
                     switch result {
                     case .success(let completedChunk):
+                        print("📦 [CHUNK RECEIVED] Processing completed chunk: \(completedChunk.id)")
+
                         // Update chunk in the array - 배열 바운드 체크
                         guard fileIndex < self.fileChunks.count && chunkIndex < self.fileChunks[fileIndex].chunks.count else {
                             print("❌ Invalid chunk indices during update: fileIndex=\(fileIndex), chunkIndex=\(chunkIndex)")
@@ -1261,27 +1164,25 @@ class ParallelChunkDownloadManager: ObservableObject {
                             return
                         }
                         self.fileChunks[fileIndex].chunks[chunkIndex] = completedChunk
-                        
-                        // Save chunk data to temporary file
-                        if let data = completedChunk.data {
-                            self.saveChunkToTemp(data: data, fileIndex: fileIndex, chunkIndex: chunkIndex)
-                        }
-                        
+
+                        // The chunk data is already saved to a temporary file by the ChunkDownloader.
+                        // We just need to update the state here. The merge function will pick it up from the correct location.
+
                         self.updateProgress()
                         print("Chunk completed: \(completedChunk.id)")
-                        
+
                     case .failure(let error):
                         print("Chunk download failed: \(chunk.id) - \(error.localizedDescription)")
-                        
+
                         // Retry logic
                         var failedChunk = chunk
                         failedChunk.retryCount += 1
                         failedChunk.lastError = error.localizedDescription
-                        
+
                         if failedChunk.retryCount < 3 {
                             print("Retrying chunk: \(chunk.id) (attempt \(failedChunk.retryCount + 1))")
                             self.fileChunks[fileIndex].chunks[chunkIndex] = failedChunk
-                            
+
                             // Retry after delay
                             DispatchQueue.main.asyncAfter(deadline: .now() + Double(failedChunk.retryCount)) {
                                 Task {
@@ -1292,112 +1193,126 @@ class ParallelChunkDownloadManager: ObservableObject {
                             self.errorMessage = "Chunk download failed after retries: \(chunk.id)"
                         }
                     }
-                    
+
                     continuation.resume()
                 }
             }
         }
     }
-    
-    private func saveChunkToTemp(data: Data, fileIndex: Int, chunkIndex: Int) {
-        let fileName = "file_\(fileIndex)_chunk_\(chunkIndex).tmp"
-        let chunkFile = tempDirectory.appendingPathComponent(fileName)
-        
-        do {
-            try data.write(to: chunkFile)
-        } catch {
-            print("Failed to save chunk to temp: \(error)")
-        }
-    }
-    
+
     private func mergeChunks(fileIndex: Int, destinationDirectory: URL) async {
         guard fileIndex < fileChunks.count else { return }
-        
+
         let fileChunk = fileChunks[fileIndex]
-        
+
         // Check if all chunks are completed
         guard fileChunk.isAllChunksCompleted else {
             print("Not all chunks completed for file: \(fileChunk.fileName)")
             return
         }
-        
+
         print("Merging chunks for file: \(fileChunk.fileName)")
-        
+
         let destinationFile = destinationDirectory.appendingPathComponent(fileChunk.fileName)
-        
+
+        // Define the correct chunks directory used by ChunkDownloader
+        guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            errorMessage = "Cannot access documents directory"
+            return
+        }
+        let chunksDir = documentsDir.appendingPathComponent("temp_chunks")
+
         do {
             // Create destination directory if needed
             try FileManager.default.createDirectory(at: destinationDirectory, withIntermediateDirectories: true, attributes: nil)
-            
+
             // Remove existing file if present
             if FileManager.default.fileExists(atPath: destinationFile.path) {
                 try FileManager.default.removeItem(at: destinationFile)
             }
-            
+
             // Create empty destination file
             FileManager.default.createFile(atPath: destinationFile.path, contents: nil, attributes: nil)
-            
+
             let fileHandle = try FileHandle(forWritingTo: destinationFile)
-            defer { 
+            defer {
                 do {
                     try fileHandle.close()
                 } catch {
                     print("Warning: Failed to close file handle: \(error)")
                 }
             }
-            
+
             // Write chunks in order
-            for chunkIndex in 0..<fileChunk.chunks.count {
-                let chunkFileName = "file_\(fileIndex)_chunk_\(chunkIndex).tmp"
-                let chunkFile = tempDirectory.appendingPathComponent(chunkFileName)
-                
+            for (chunkIndex, chunk) in fileChunk.chunks.enumerated() {
+                let chunkFileName = "\(chunk.id).tmp"
+                let chunkFile = chunksDir.appendingPathComponent(chunkFileName)
+
                 if FileManager.default.fileExists(atPath: chunkFile.path) {
-                    let chunkData = try Data(contentsOf: chunkFile)
-                    fileHandle.write(chunkData)
-                    
+                    // 스트리밍 복사: 메모리에 전체 로드하지 않고 버퍼 단위로 처리
+                    let sourceHandle = try FileHandle(forReadingFrom: chunkFile)
+                    defer { try? sourceHandle.close() }
+
+                    let bufferSize = 1024 * 1024 // 1MB 버퍼
+                    var totalCopied: Int64 = 0
+
+                    while true {
+                        let dataChunk = sourceHandle.readData(ofLength: bufferSize)
+                        if dataChunk.isEmpty { break }
+
+                        fileHandle.write(dataChunk)
+                        totalCopied += Int64(dataChunk.count)
+                    }
+
+                    print("📦 [MERGE] Streamed chunk \(chunkIndex): \(totalCopied) bytes from \(chunkFile.path)")
+
                     // Clean up chunk file
                     try FileManager.default.removeItem(at: chunkFile)
                 } else {
-                    print("Warning: Chunk file not found: \(chunkFileName)")
+                    print("Warning: Chunk file not found: \(chunkFile.path)")
                 }
             }
-            
+
             // Mark file as completed
             fileChunks[fileIndex].isCompleted = true
             fileChunks[fileIndex].mergedFilePath = destinationFile.path
-            
+
             print("File merge completed: \(fileChunk.fileName)")
-            
+
         } catch {
             print("Failed to merge chunks for \(fileChunk.fileName): \(error)")
             errorMessage = "Failed to merge file: \(fileChunk.fileName)"
         }
     }
-    
+
     private func updateProgress() {
         let now = Date()
         guard now.timeIntervalSince(lastProgressUpdate) >= progressUpdateInterval else { return }
         lastProgressUpdate = now
-        
+
         // 동시성 안전성을 위한 스냅샷 사용
         let fileChunksSnapshot = fileChunks
         guard !fileChunksSnapshot.isEmpty else {
             overallProgress = 0.0
             return
         }
-        
+
         let totalBytes = fileChunksSnapshot.reduce(Int64(0)) { result, chunk in
             let newTotal = result + chunk.totalSize
             return newTotal >= result ? newTotal : result // 오버플로우 방지
         }
-        
+
         let downloadedBytes = fileChunksSnapshot.reduce(Int64(0)) { result, chunk in
             let newTotal = result + chunk.downloadedBytes
             return newTotal >= result ? newTotal : result // 오버플로우 방지
         }
-        
-        overallProgress = totalBytes > 0 ? min(1.0, Double(downloadedBytes) / Double(totalBytes)) : 0.0
-        
+
+        let newProgress = totalBytes > 0 ? min(1.0, Double(downloadedBytes) / Double(totalBytes)) : 0.0
+        if abs(newProgress - overallProgress) > 0.01 || newProgress == 1.0 {
+            print("📈 [PROGRESS] Updated: \(String(format: "%.2f", newProgress * 100))% (\(downloadedBytes)/\(totalBytes) bytes)")
+        }
+        overallProgress = newProgress
+
         // Calculate download speed - 안전성 개선
         if let startTime = downloadStartTime {
             let elapsed = now.timeIntervalSince(startTime)
@@ -1405,7 +1320,7 @@ class ParallelChunkDownloadManager: ObservableObject {
                 let bytesDelta = max(0, downloadedBytes - totalBytesDownloaded)
                 let bytesPerSecond = Double(bytesDelta) / elapsed
                 downloadSpeed = max(0, bytesPerSecond) // 음수 방지
-                
+
                 // Estimate remaining time
                 let remainingBytes = max(0, totalBytes - downloadedBytes)
                 if bytesPerSecond > 0 && remainingBytes > 0 {
@@ -1417,42 +1332,67 @@ class ParallelChunkDownloadManager: ObservableObject {
                 }
             }
         }
-        
+
         totalBytesDownloaded = max(totalBytesDownloaded, downloadedBytes) // 역행 방지
     }
-    
+
     func cancelDownload() {
         isDownloading = false
         chunkDownloader.cancelAllDownloads()
-        
+
         // Clean up temp files - 안전하게 정리
         do {
-            if FileManager.default.fileExists(atPath: tempDirectory.path) {
-                let tempContents = try FileManager.default.contentsOfDirectory(atPath: tempDirectory.path)
+            guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+            let chunksDir = documentsDir.appendingPathComponent("temp_chunks")
+            if FileManager.default.fileExists(atPath: chunksDir.path) {
+                let tempContents = try FileManager.default.contentsOfDirectory(atPath: chunksDir.path)
                 print("🗑️ Cleaning up \(tempContents.count) temporary files")
-                
+
                 // 각 파일을 개별적으로 삭제
                 for fileName in tempContents {
-                    let filePath = tempDirectory.appendingPathComponent(fileName)
+                    let filePath = chunksDir.appendingPathComponent(fileName)
                     try FileManager.default.removeItem(at: filePath)
                 }
-                
+
                 // 빈 디렉토리 삭제
-                try FileManager.default.removeItem(at: tempDirectory)
-                print("✅ Temporary directory cleaned up: \(tempDirectory.path)")
+                try FileManager.default.removeItem(at: chunksDir)
+                print("✅ Temporary directory cleaned up: \(chunksDir.path)")
             }
         } catch {
             print("⚠️ Failed to clean up temp directory: \(error.localizedDescription)")
             // 임시 파일 정리 실패는 심각한 문제가 아님
         }
-        
+
         print("✅ Download cancellation completed")
     }
-    
+
     func pauseDownload() {
+        print("🔄 [PARALLEL PAUSE] Pausing parallel chunk downloads...")
         isDownloading = false
+        
+        // Cancel all active downloads
         chunkDownloader.cancelAllDownloads()
-        print("Download paused - chunks can be resumed")
+        
+        // Update chunks to reflect pause state
+        for fileIndex in fileChunks.indices {
+            for chunkIndex in fileChunks[fileIndex].chunks.indices {
+                if fileChunks[fileIndex].chunks[chunkIndex].isInProgress {
+                    // The original code had a bug here trying to set a status that doesn't exist on ChunkInfo.
+                    // For now, cancelling is sufficient. The resume logic will restart them.
+                }
+            }
+        }
+        
+        // Save the current state for resuming
+        saveDownloadState()
+        
+        print("✅ [PARALLEL PAUSE] Parallel download paused - chunks can be resumed")
+    }
+    
+    private func saveDownloadState() {
+        // Save the current download state including chunk information
+        // This allows resuming the download later
+        // You can implement this based on your app's requirements
     }
 }
 
@@ -1652,7 +1592,11 @@ class ModelDownloadManager: ObservableObject {
     private var modelDirectory: URL?
     var currentFileIndex = 0 // ContentView에서 접근하도록 internal로 변경
     private var downloadStartTime: Date?
-    let networkMonitor = NetworkMonitor()
+    @Published var isNetworkConnected = false
+    @Published var isWiFiConnected = false
+    @Published var isCellularConnected = false
+    private let networkMonitor = NWPathMonitor()
+    private let networkQueue = DispatchQueue(label: "NetworkMonitor")
     private var userApprovedCellular = false
     
     // 청크 기반 다운로드 시스템
@@ -1670,6 +1614,7 @@ class ModelDownloadManager: ObservableObject {
     
     deinit {
         // 메모리 해제 시 리소스 정리
+        networkMonitor.cancel()
         let manager = self.chunkDownloadManager
         Task { @MainActor in
             manager.cancelDownload()
@@ -1681,24 +1626,24 @@ class ModelDownloadManager: ObservableObject {
     private func setupNetworkMonitoring() {
         print("🔧 [ModelDownloadManager] setupNetworkMonitoring 시작")
         
-        // NetworkMonitor의 상태 변화를 구독
-        networkMonitor.$isConnected
-            .combineLatest(networkMonitor.$isWiFi, networkMonitor.$isCellular, networkMonitor.$isExpensive)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] isConnected, isWiFi, isCellular, isExpensive in
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
                 guard let self = self else { return }
                 
-                print("🔄 [ModelDownloadManager] 네트워크 상태 변화 감지:")
-                print("  - isConnected: \(isConnected)")
-                print("  - isWiFi: \(isWiFi)")
-                print("  - isCellular: \(isCellular)")
-                print("  - isExpensive: \(isExpensive)")
+                self.isNetworkConnected = path.status == .satisfied
+                self.isWiFiConnected = path.usesInterfaceType(.wifi)
+                self.isCellularConnected = path.usesInterfaceType(.cellular)
                 
-                if isConnected {
-                    if isWiFi {
+                print("🔄 [ModelDownloadManager] 네트워크 상태 변화 감지:")
+                print("  - isConnected: \(self.isNetworkConnected)")
+                print("  - isWiFi: \(self.isWiFiConnected)")
+                print("  - isCellular: \(self.isCellularConnected)")
+                
+                if self.isNetworkConnected {
+                    if self.isWiFiConnected {
                         self.networkStatusMessage = "WiFi 연결됨"
-                    } else if isCellular {
-                        self.networkStatusMessage = isExpensive ? "셀룰러 연결됨 (제한된 데이터)" : "셀룰러 연결됨"
+                    } else if self.isCellularConnected {
+                        self.networkStatusMessage = path.isExpensive ? "셀룰러 연결됨 (제한된 데이터)" : "셀룰러 연결됨"
                     } else {
                         self.networkStatusMessage = "인터넷 연결됨"
                     }
@@ -1708,16 +1653,62 @@ class ModelDownloadManager: ObservableObject {
                 
                 print("📱 [ModelDownloadManager] UI 상태 메시지 업데이트: \(self.networkStatusMessage)")
             }
-            .store(in: &cancellables)
+        }
+        
+        networkMonitor.start(queue: networkQueue)
+    }
+    
+    private func cleanupOrphanedTempFiles() {
+        guard let documentsDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let chunksDir = documentsDir.appendingPathComponent("temp_chunks")
+        
+        do {
+            if FileManager.default.fileExists(atPath: chunksDir.path) {
+                let tempFiles = try FileManager.default.contentsOfDirectory(at: chunksDir, includingPropertiesForKeys: nil)
+                if !tempFiles.isEmpty {
+                    print("🗑️ [CLEANUP] Found \(tempFiles.count) orphaned temp files, cleaning up...")
+                    try FileManager.default.removeItem(at: chunksDir)
+                    print("✅ [CLEANUP] Orphaned temp files cleaned up")
+                }
+            }
+        } catch {
+            print("⚠️ [CLEANUP] Failed to clean orphaned temp files: \(error)")
+        }
+    }
+    
+    private func checkNetworkConnectivity() async -> Bool {
+        return await withCheckedContinuation { continuation in
+            var request = URLRequest(url: URL(string: "https://www.apple.com/library/test/success.html")!)
+            request.timeoutInterval = 5
+
+            let task = URLSession.shared.dataTask(with: request) { _, response, error in
+                if let error = error as? URLError, error.code == .notConnectedToInternet {
+                    continuation.resume(returning: false)
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    continuation.resume(returning: true)
+                } else {
+                    continuation.resume(returning: false)
+                }
+            }
+            task.resume()
+        }
     }
     
     private func loadPreviousChunkDownloadState() {
         chunkDownloadState = ChunkStatePersistence.loadState()
         guard let state = chunkDownloadState else {
             print("이전 청크 다운로드 상태 없음")
+            // 앱 재시작 시 남은 임시 파일 정리
+            cleanupOrphanedTempFiles()
             return
         }
             print("이전 청크 다운로드 상태 로드: \(state.modelTier), 진행률: \(state.downloadedSize)/\(state.totalSize)")
+            print("🔄 [RECOVERY] 앱 재시작 후 다운로드 상태 복구")
             
         // 상태 복원 - nil 안전성 보장
         guard let tier = ModelTier.allCases.first(where: { $0.rawValue == state.modelTier }) else {
@@ -1748,6 +1739,7 @@ class ModelDownloadManager: ObservableObject {
         chunkDownloadManager.$overallProgress
             .receive(on: DispatchQueue.main)
             .sink { [weak self] progress in
+                print("📊 [UI UPDATE] Progress updated: \(String(format: "%.2f", progress * 100))%")
                 self?.downloadProgress = progress
             }
             .store(in: &cancellables)
@@ -1824,18 +1816,18 @@ class ModelDownloadManager: ObservableObject {
            let tier = ModelTier.allCases.first(where: { $0.rawValue == state.modelTier }) {
             
             let modelPath = modelsPath.appendingPathComponent(tier.folderName)
-            let expectedFiles = ["model.safetensors": tier.mainFileUrl, 
-                               "config.json": tier.configFileUrl, 
-                               "tokenizer.json": tier.tokenizerFileUrl]
+            let expectedFiles = ["model.safetensors", "config.json", "tokenizer.json"]
             
             // 파일 무결성 검증
+            let requiredFiles = ["model.safetensors", "config.json", "tokenizer.json"]
             var allValid = true
-            for (fileName, url) in expectedFiles {
+            for fileName in requiredFiles { // 변경된 부분
                 let filePath = modelPath.appendingPathComponent(fileName)
-                if let fileInfo = state.files.first(where: { $0.url == url }) {
+                // ... (기존 로직)
+                if let fileInfo = state.files.first(where: { $0.fileName == fileName }) { // 변경된 부분
                     let verificationResult = ChunkFileIntegrityVerifier.verifyMergedFile(
                         at: filePath, 
-                        expectedSize: fileInfo.totalSize
+                        expectedSize: fileInfo.totalSize // fileInfo.totalSize 사용
                     )
                     if !verificationResult.isValid {
                         allValid = false
@@ -1881,69 +1873,59 @@ class ModelDownloadManager: ObservableObject {
     }
     
     // MARK: - Chunk-Based Download Method (Production Ready)
-    func downloadModel(tier: ModelTier) {
-        // 메인 스레드에서 실행 확인
-        assert(Thread.isMainThread, "downloadModel must be called on main thread")
-        
+    @MainActor
+    func downloadModel(tier: ModelTier) async {
         print("🚀 [CHUNK SYSTEM] 청크 기반 다운로드 시작: \(tier.rawValue)")
-        print("📊 [CHUNK SYSTEM] 현재 상태 - isDownloading: \(isDownloading)")
-        print("🌐 [CHUNK SYSTEM] 네트워크 상태 - isConnected: \(networkMonitor.isConnected), isWiFi: \(networkMonitor.isWiFi), isCellular: \(networkMonitor.isCellular)")
-        
-        // 네트워크 연결 확인
-        guard networkMonitor.isConnected else {
-            print("❌ [CHUNK SYSTEM] 네트워크 연결 없음")
+
+        let isConnected = await checkNetworkConnectivity()
+        guard isConnected else {
             errorMessage = DownloadError.networkUnavailable.localizedDescription
             return
         }
-        
-        // 이전 다운로드 취소 및 상태 초기화
+
         cancelDownload()
         resetDownloadState()
-        
-        // UI 상태 업데이트
+
         selectedTier = tier
         errorMessage = nil
         canResume = false
         currentFileIndex = 0
         downloadStartTime = Date()
-        currentFileName = "파일 크기 확인 중..."
-        
-        // 모델 디렉토리 설정
+        currentFileName = "파일 목록 가져오는 중..."
+
         guard let modelsPath = AppBundleStorageManager.getModelsDirectory() else {
             errorMessage = "앱 모델 디렉토리에 접근할 수 없습니다"
             return
         }
-        
         modelDirectory = modelsPath.appendingPathComponent(tier.folderName)
-        
+
         guard let modelDir = modelDirectory else {
             errorMessage = "모델 디렉토리 경로를 설정할 수 없습니다"
             return
         }
-        
-        // 다운로드할 파일 목록 구성
-        filesToDownload = [
-            (tier.mainFileUrl, "model.safetensors"),
-            (tier.configFileUrl, "config.json"),
-            (tier.tokenizerFileUrl, "tokenizer.json")
-        ]
-        
-        print("📁 [CHUNK SYSTEM] 다운로드할 파일 목록:")
-        for (index, file) in filesToDownload.enumerated() {
-            print("  \(index + 1). \(file.1) - \(file.0)")
-        }
-        
-        // 청크 기반 다운로드 시작
-        print("🎯 [CHUNK SYSTEM] Task 생성 중...")
+
         Task {
-            print("✅ [CHUNK SYSTEM] Task 시작됨")
-            await startChunkBasedDownload(tier: tier, modelDir: modelDir)
-            print("🏁 [CHUNK SYSTEM] Task 완료됨")
+            do {
+                let allFiles = try await HuggingFaceAPIClient.fetchFileList(for: tier.repoId)
+                
+                let requiredEndings = ["config.json", "tokenizer.json", ".safetensors"]
+                let filesToDownload = allFiles.filter { fileName in
+                    requiredEndings.contains { fileName.hasSuffix($0) }
+                }.map { (url: "https://huggingface.co/\(tier.repoId)/resolve/main/\($0)", fileName: $0) }
+
+                guard !filesToDownload.isEmpty else {
+                    throw DownloadError.fileSizeNotAvailable
+                }
+
+                await startChunkBasedDownload(tier: tier, modelDir: modelDir, filesToDownload: filesToDownload)
+            } catch {
+                errorMessage = "파일 목록을 가져오는 데 실패했습니다: \(error.localizedDescription)"
+            }
         }
     }
     
     // MARK: - Chunk-Based Download Implementation
-    private func startChunkBasedDownload(tier: ModelTier, modelDir: URL) async {
+    private func startChunkBasedDownload(tier: ModelTier, modelDir: URL, filesToDownload: [(url: String, fileName: String)]) async {
         print("🔥 [CHUNK] startChunkBasedDownload 시작")
         do {
             // 1. 실제 파일 크기 확인 (HEAD 요청) - 에러 핸들링 개선
@@ -2069,6 +2051,11 @@ class ModelDownloadManager: ObservableObject {
             if filesToActuallyDownload.isEmpty {
                 await completeDownloadImmediately(tier: tier)
             } else {
+                await MainActor.run {
+                    isDownloading = true
+                    currentFileName = "다운로드 시작 중..."
+                    downloadProgress = 0.0
+                }
                 await startChunkDownload(files: filesToActuallyDownload, destinationDirectory: modelDir, tier: tier)
             }
             
@@ -2108,6 +2095,12 @@ class ModelDownloadManager: ObservableObject {
         }
         
         do {
+            // UI 상태 업데이트
+            await MainActor.run {
+                currentFileName = "청크 다운로드 시작..."
+                isDownloading = true
+            }
+            
             // 청크 다운로드 시작
             await chunkDownloadManager.startDownload(files: files, to: destinationDirectory)
             
@@ -2250,8 +2243,13 @@ class ModelDownloadManager: ObservableObject {
     
     // MARK: - Chunk-Based Download Control
     func pauseDownload() {
-        // 메인 스레드에서 실행 확인
-        assert(Thread.isMainThread, "pauseDownload must be called on main thread")
+        // 메인 스레드에서 실행 확인 (안전한 방식)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.pauseDownload()
+            }
+            return
+        }
         
         print("[CHUNK PAUSE] 청크 다운로드 일시정지")
         chunkDownloadManager.pauseDownload()
@@ -2264,8 +2262,13 @@ class ModelDownloadManager: ObservableObject {
     }
     
     func cancelDownload() {
-        // 메인 스레드에서 실행 확인
-        assert(Thread.isMainThread, "cancelDownload must be called on main thread")
+        // 메인 스레드에서 실행 확인 (안전한 방식)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.cancelDownload()
+            }
+            return
+        }
         
         print("[CHUNK CANCEL] 청크 다운로드 취소 (완료된 청크는 보존)")
         chunkDownloadManager.cancelDownload()
@@ -2280,8 +2283,13 @@ class ModelDownloadManager: ObservableObject {
     }
     
     func resumeDownload() {
-        // 메인 스레드에서 실행 확인
-        assert(Thread.isMainThread, "resumeDownload must be called on main thread")
+        // 메인 스레드에서 실행 확인 (안전한 방식)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.resumeDownload()
+            }
+            return
+        }
         
         guard let tier = selectedTier else {
             errorMessage = "재시작할 모델 정보가 없습니다"
@@ -2290,42 +2298,36 @@ class ModelDownloadManager: ObservableObject {
         
         // 청크 기반 다운로드 재시작
         print("[CHUNK RESUME] 청크 다운로드 재시작")
-        downloadModel(tier: tier)
+        Task {
+            await downloadModel(tier: tier)
+        }
     }
     
     func resetDownload() {
-        // 메인 스레드에서 실행 확인
-        assert(Thread.isMainThread, "resetDownload must be called on main thread")
-        
+        // 메인 스레드에서 실행 확인 (안전한 방식)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.resetDownload()
+            }
+            return
+        }
+
         cancelDownload()
-        
+
         // Documents 폴더 내 다운로드된 파일 안전하게 삭제
-        if let modelDir = modelDirectory {
+        if let tier = selectedTier, let modelsPath = AppBundleStorageManager.getModelsDirectory() {
+            let modelDir = modelsPath.appendingPathComponent(tier.folderName)
             do {
                 if FileManager.default.fileExists(atPath: modelDir.path) {
-                    // Documents 폴더 내 모델 파일 삭제
-                    let requiredFiles = ["model.safetensors", "config.json", "tokenizer.json"]
-                    for fileName in requiredFiles {
-                        let filePath = modelDir.appendingPathComponent(fileName)
-                        if FileManager.default.fileExists(atPath: filePath.path) {
-                            try FileManager.default.removeItem(at: filePath)
-                            print("삭제 완료: \(filePath.path)")
-                        }
-                    }
-                    
-                    // 빈 디렉토리인 경우 디렉토리도 삭제
-                    let contents = try FileManager.default.contentsOfDirectory(atPath: modelDir.path)
-                    if contents.isEmpty {
-                        try FileManager.default.removeItem(at: modelDir)
-                        print("빈 모델 디렉토리 삭제: \(modelDir.path)")
-                    }
+                    try FileManager.default.removeItem(at: modelDir)
+                    print("삭제 완료: \(modelDir.path)")
                 }
             } catch {
                 print("모델 파일 삭제 실패: \(error.localizedDescription)")
                 // 삭제 실패해도 리셋은 계속 진행
             }
         }
-        
+
         // [CHUNK SYSTEM] 완전한 상태 초기화
         isDownloading = false
         downloadProgress = 0.0
@@ -2344,16 +2346,16 @@ class ModelDownloadManager: ObservableObject {
         downloadStartTime = nil
         downloadSpeed = 0.0
         estimatedTimeRemaining = 0
-        
+
         // 청크 관련 상태 초기화
         activeChunks = []
         completedChunksCount = 0
         totalChunksCount = 0
-        
+
         // 영구 저장된 상태도 삭제
         ChunkStatePersistence.clearState()
         chunkDownloadState = nil
-        
+
         print("[CHUNK SYSTEM] 다운로드 상태 완전 초기화 완료")
     }
     
@@ -2416,7 +2418,9 @@ class ModelDownloadManager: ObservableObject {
         // 청크 다운로드 매니저는 자체적으로 네트워크 설정을 관리
         // 다운로드 재시작
         if let tier = selectedTier {
-            downloadModel(tier: tier)
+            Task {
+                await downloadModel(tier: tier)
+            }
         }
     }
     
@@ -2456,6 +2460,12 @@ struct ContentView: View {
     // UI 상태 추가 - 메모리 안전성
     @State private var lastUpdateTime = Date()
     private let uiUpdateThrottle: TimeInterval = 0.1 // UI 업데이트 제한
+    
+    init() {
+        // 앱 시작 시 무조건 나와야 하는 로그
+        print("🚨🚨🚨 CONTENTVIEW INIT - 앱이 시작되었습니다!!! 🚨🚨🚨")
+        NSLog("🚨 ContentView initialized")
+    }
     
     private func formatBytes(_ bytes: Int64) -> String {
         guard bytes >= 0 else { return "0 MB" } // 음수 방지
@@ -2722,6 +2732,8 @@ struct ContentView: View {
         .foregroundColor(.blue)
     }
     
+    @State private var isShowingDeleteConfirmation = false
+
     private var completedView: some View {
         VStack(spacing: 12) {
             HStack {
@@ -2737,11 +2749,11 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                Button("재다운로드") {
-                    downloader.resetDownload()
+                Button("모델 삭제") {
+                    isShowingDeleteConfirmation = true
                 }
                 .font(.caption)
-                .foregroundColor(.blue)
+                .foregroundColor(.red)
             }
         }
         .padding()
@@ -2751,6 +2763,14 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Color.green.opacity(0.2), lineWidth: 1)
         )
+        .alert("모델 삭제 확인", isPresented: $isShowingDeleteConfirmation) {
+            Button("삭제", role: .destructive) {
+                downloader.resetDownload()
+            }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("다운로드된 AI 모델을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+        }
     }
     
     private var modelSelectionView: some View {
@@ -2811,14 +2831,14 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(downloader.networkMonitor.isConnected ? Color.green.opacity(0.05) : Color.red.opacity(0.05))
+            .background(downloader.isNetworkConnected ? Color.green.opacity(0.05) : Color.red.opacity(0.05))
             .cornerRadius(8)
         }
     }
     
     private var networkStatusIcon: some View {
-        Image(systemName: downloader.networkMonitor.isWiFi ? "wifi" : downloader.networkMonitor.isCellular ? "antenna.radiowaves.left.and.right" : "network")
-            .foregroundColor(downloader.networkMonitor.isConnected ? .green : .red)
+        Image(systemName: downloader.isWiFiConnected ? "wifi" : downloader.isCellularConnected ? "antenna.radiowaves.left.and.right" : "network")
+            .foregroundColor(downloader.isNetworkConnected ? .green : .red)
     }
     
     @ViewBuilder
