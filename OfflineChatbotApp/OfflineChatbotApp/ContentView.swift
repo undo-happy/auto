@@ -647,6 +647,7 @@ struct ChunkInfo: Equatable, Codable {
     let startByte: Int64
     let endByte: Int64
     var isCompleted: Bool = false
+    var isPaused: Bool = false
     var downloadedBytes: Int64 = 0
     var data: Data?
     var retryCount: Int = 0
@@ -657,7 +658,7 @@ struct ChunkInfo: Equatable, Codable {
     // Codable을 위한 커스텀 구현 - Data는 포함하지 않음
     enum CodingKeys: String, CodingKey {
         case id, fileUrl, fileName, startByte, endByte
-        case isCompleted, downloadedBytes, retryCount
+        case isCompleted, isPaused, downloadedBytes, retryCount
         case lastError, startTime, completionTime
     }
     
@@ -1365,29 +1366,24 @@ class ParallelChunkDownloadManager: ObservableObject {
 
         print("✅ Download cancellation completed")
     }
-
-    func pauseDownload() {
-        print("🔄 [PARALLEL PAUSE] Pausing parallel chunk downloads...")
-        isDownloading = false
+    
+    func resumePausedChunks() {
+        print("🔄 [RESUME] Resuming paused downloads...")
         
-        // Cancel all active downloads
-        chunkDownloader.cancelAllDownloads()
-        
-        // Update chunks to reflect pause state
+        // 일시정지된 청크들을 다시 다운로드 대기 상태로 변경
         for fileIndex in fileChunks.indices {
             for chunkIndex in fileChunks[fileIndex].chunks.indices {
-                if fileChunks[fileIndex].chunks[chunkIndex].isInProgress {
-                    // The original code had a bug here trying to set a status that doesn't exist on ChunkInfo.
-                    // For now, cancelling is sufficient. The resume logic will restart them.
+                if fileChunks[fileIndex].chunks[chunkIndex].isPaused {
+                    fileChunks[fileIndex].chunks[chunkIndex].isPaused = false
+                    // isInProgress는 실제 다운로드가 시작될 때 true로 설정됨
                 }
             }
         }
         
-        // Save the current state for resuming
-        saveDownloadState()
-        
-        print("✅ [PARALLEL PAUSE] Parallel download paused - chunks can be resumed")
+        print("✅ [RESUME] Paused chunks have been reset for resuming")
     }
+    
+    
     
     private func saveDownloadState() {
         // Save the current download state including chunk information
@@ -2242,24 +2238,7 @@ class ModelDownloadManager: ObservableObject {
     
     
     // MARK: - Chunk-Based Download Control
-    func pauseDownload() {
-        // 메인 스레드에서 실행 확인 (안전한 방식)
-        if !Thread.isMainThread {
-            DispatchQueue.main.async {
-                self.pauseDownload()
-            }
-            return
-        }
-        
-        print("[CHUNK PAUSE] 청크 다운로드 일시정지")
-        chunkDownloadManager.pauseDownload()
-        canResume = true
-        
-        // 현재 상태 저장
-        if let tier = selectedTier {
-            saveChunkDownloadState(tier: tier, isCompleted: false)
-        }
-    }
+    // This function is now handled by the parallel downloader above
     
     func cancelDownload() {
         // 메인 스레드에서 실행 확인 (안전한 방식)
@@ -2282,6 +2261,28 @@ class ModelDownloadManager: ObservableObject {
         }
     }
     
+    func pauseDownload() {
+        // 메인 스레드에서 실행 확인 (안전한 방식)
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.pauseDownload()
+            }
+            return
+        }
+        
+        print("🔄 [PAUSE] Pausing downloads...")
+        isDownloading = false
+        
+        canResume = true
+        
+        // 현재 상태 저장 (청크 매니저용)
+        if let tier = selectedTier {
+            saveChunkDownloadState(tier: tier, isCompleted: false)
+        }
+        
+        print("✅ [PAUSE] Download paused - can be resumed")
+    }
+    
     func resumeDownload() {
         // 메인 스레드에서 실행 확인 (안전한 방식)
         if !Thread.isMainThread {
@@ -2295,6 +2296,9 @@ class ModelDownloadManager: ObservableObject {
             errorMessage = "재시작할 모델 정보가 없습니다"
             return
         }
+        
+        // 일시정지된 청크들 재개
+        chunkDownloadManager.resumePausedChunks()
         
         // 청크 기반 다운로드 재시작
         print("[CHUNK RESUME] 청크 다운로드 재시작")
